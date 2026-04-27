@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- description for HCE service; AAPT requires a string resource reference -->
+    <string name="apduservice_description">APDU service for card emulation</string>
+</resources>

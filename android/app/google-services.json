@@ -1,0 +1,76 @@
+{
+  "project_info": {
+    "project_number": "508048021289",
+    "project_id": "card-app-829ee",
+    "storage_bucket": "card-app-829ee.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:508048021289:android:46a059d707001a54920938",
+        "android_client_info": {
+          "package_name": "com.allgoodtech.padi_pay_biz"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD0jTGqnQuqoyr-4F2EisjqeWykPChY88E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:508048021289:android:791aeadbee3eeaff920938",
+        "android_client_info": {
+          "package_name": "com.allgoodtech.padi_pay_bizness"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD0jTGqnQuqoyr-4F2EisjqeWykPChY88E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:508048021289:android:5a57b2ec46dffe4a920938",
+        "android_client_info": {
+          "package_name": "com.allgoodtech.padipay"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "508048021289-hg2rhejum4k6kbi8bnm0bd25e4pbp5te.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.allgoodtech.padipay",
+            "certificate_hash": "ce90c7ef4d406f64e5c958cd3f642cc18b22ea1e"
+          }
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD0jTGqnQuqoyr-4F2EisjqeWykPChY88E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

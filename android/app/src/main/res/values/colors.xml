@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Primary brand color: #007AFF (iOS blue matching app's primaryColor) -->
+    <color name="primaryBlue">#007AFF</color>
+    <color name="primaryBlueDark">#0055B3</color>
+    <color name="white">#FFFFFF</color>
+    <color name="black">#000000</color>
+    <color name="textGrey">#888888</color>
+    <color name="backgroundGrey">#F5F5F5</color>
+</resources>

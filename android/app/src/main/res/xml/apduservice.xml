@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<host-apdu-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/apduservice_description"
+    android:requireDeviceUnlock="false">
+    <!--
+        Replace the example AID below with the Application ID(s) your HCE
+        implementation needs to respond to.  The exact contents depend on
+        your NFC payment or access-control use case; the sample value is just
+        a placeholder so the resource exists and the manifest can resolve.
+    -->
+    <aid-group android:category="payment">
+        <aid-filter android:name="F0010203040506"/>
+    </aid-group>
+</host-apdu-service>
