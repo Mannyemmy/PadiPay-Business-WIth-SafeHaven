@@ -11,8 +11,8 @@ import 'package:open_file/open_file.dart';
 import 'package:padi_pay_business/cards_page.dart';
 import 'package:padi_pay_business/home_pages/home_page.dart';
 import 'package:padi_pay_business/my_business/my_business.dart';
-import 'package:padi_pay_business/profile/profile_page.dart';
 import 'package:padi_pay_business/padi_book/padi_book_page.dart';
+import 'package:padi_pay_business/profile/profile_page.dart';
 import 'package:padi_pay_business/receipt_page.dart';
 import 'package:padi_pay_business/ui/bottom_nav_bar.dart';
 import 'package:padi_pay_business/utils.dart';
@@ -816,13 +816,13 @@ class _TransactionsHistoryState extends State<TransactionsHistory> {
                 .where((id) => id.isNotEmpty)
                 .toList();
             userAccountId =
-                data['getAnchorData']?['virtualAccount']?['data']?['id'];
+                getVirtualAccountData(data)?['id']?.toString();
             print('posStandAccountIds: $posStandAccountIds');
             print('userAccountId: $userAccountId');
           } else {
             // Regular user with business doc
             userAccountId =
-                data['getAnchorData']?['virtualAccount']?['data']?['id'];
+                getVirtualAccountData(data)?['id']?.toString();
           }
           setState(() {});
         } else {
@@ -978,13 +978,7 @@ class _TransactionsHistoryState extends State<TransactionsHistory> {
                             return;
                           }
 
-                          if (index == 1) {
-                            navigateTo(
-                              context,
-                              CardsPage(),
-                              type: NavigationType.push,
-                            );
-                          }
+                        
                           if (index == 2) {
                             navigateTo(
                               context,
@@ -1774,6 +1768,11 @@ class _TransactionsHistoryState extends State<TransactionsHistory> {
                                   'MMMM d, yyyy',
                                 ).format(date);
                                 final initialName =
+                                  data['senderName'] ??
+                                  data['senderAccountName'] ??
+                                  data['originatorName'] ??
+                                  data['nameEnquiry']?['accountName'] ??
+                                  data['api_response']?['data']?['attributes']?['nameEnquiry']?['accountName'] ??
                                     data['recipientName'] ??
                                     data['phoneNumber'] ??
                                     data['meterNumber'] ??

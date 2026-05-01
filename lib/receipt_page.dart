@@ -14,6 +14,7 @@ import 'package:pdf/widgets.dart' as pw;
 import 'package:share_plus/share_plus.dart';
 import 'package:vector_math/vector_math_64.dart' as vm;
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shimmer/shimmer.dart';
 
 class ReceiptPage extends StatefulWidget {
@@ -43,6 +44,16 @@ class _ReceiptPageState extends State<ReceiptPage> {
   List<Map<String, String>> senderDetails = [];
   List<Map<String, String>> transactionInfo = [];
   List<Map<String, String>> cardDetails = [];           // ← NEW for atm_payment
+
+  String _firstNonEmpty(List<dynamic> values, {String fallback = ''}) {
+    for (final value in values) {
+      final text = (value ?? '').toString().trim();
+      if (text.isNotEmpty && text.toLowerCase() != 'null') {
+        return text;
+      }
+    }
+    return fallback;
+  }
 
   @override
   void initState() {
@@ -99,14 +110,66 @@ class _ReceiptPageState extends State<ReceiptPage> {
       if (transactionDoc.docs.isNotEmpty) {
         final data = transactionDoc.docs.first.data();
         final String? uid = data['actualSender'] ?? data['userId'];
+        final currentUserId = FirebaseAuth.instance.currentUser?.uid;
         final timestamp = data['createdAtFirestore'] ?? data['timestamp'] as Timestamp?;
+        final txType = (data['type'] as String? ?? '').toLowerCase();
+        final isAnonymousTransfer =
+            txType == 'ghost_transfer' || txType == 'anonymous_transfer';
+        final isSent = uid == currentUserId || data['userId'] == currentUserId;
+        final isReceivedAnonymously = isAnonymousTransfer && !isSent;
+
+        String currentUserName = '';
+        String currentUserAccountNumber = '';
+        String currentUserBankName = '';
+        if (currentUserId != null && currentUserId.isNotEmpty) {
+          try {
+            final currentUserDoc = await FirebaseFirestore.instance
+                .collection('users')
+                .doc(currentUserId)
+                .get();
+            if (currentUserDoc.exists) {
+              final currentUserData = currentUserDoc.data() ?? <String, dynamic>{};
+              currentUserName = _firstNonEmpty([
+                '${currentUserData['firstName'] ?? ''} ${currentUserData['lastName'] ?? ''}'.trim(),
+                currentUserData['userName'],
+                currentUserData['email'],
+              ]);
+              final currentVa = getVirtualAccountData(currentUserData);
+              currentUserAccountNumber =
+                  currentVa?['attributes']?['accountNumber']?.toString() ?? '';
+              currentUserBankName =
+                  currentVa?['attributes']?['bank']?['name']?.toString() ?? '';
+            }
+          } catch (e) {
+            debugPrint('Error fetching current user for receipt details: $e');
+          }
+        }
 
         // Fetch sender / merchant details (businesses first, then users)
-        String fetchedSenderName = '';
-        String fetchedSenderAccountNumber = '';
-        String fetchedSenderBankName = '';
+        String fetchedSenderName = _firstNonEmpty([
+          data['senderName'],
+          data['debitAccountName'],
+          data['originatorName'],
+          data['originatorAccountName'],
+          data['senderAccountName'],
+          data['counterParty']?['accountName'],
+          data['api_response']?['data']?['attributes']?['senderName'],
+          data['api_response']?['data']?['attributes']?['nameEnquiry']?['accountName'],
+        ]);
+        String fetchedSenderAccountNumber = _firstNonEmpty([
+          data['senderAccountNumber'],
+          data['debitAccountNumber'],
+          data['originatorAccountNumber'],
+          data['counterParty']?['accountNumber'],
+        ]);
+        String fetchedSenderBankName = _firstNonEmpty([
+          data['senderBankName'],
+          data['debitBankName'],
+          data['originatorBankName'],
+          data['bankName'],
+        ]);
 
-        if (uid != null && uid.isNotEmpty) {
+        if (!isReceivedAnonymously && uid != null && uid.isNotEmpty) {
           // Check businesses collection first
           final busSnap = await FirebaseFirestore.instance.collection('businesses').doc(uid).get();
 
@@ -115,12 +178,20 @@ class _ReceiptPageState extends State<ReceiptPage> {
             final String kycStatus = busData['kycStatus'] ?? '';
 
             if (kycStatus == 'APPROVED') {
-              fetchedSenderName = busData['business_data']?['name']?.toString().trim() ?? 'Business User';
+              fetchedSenderName = _firstNonEmpty([
+                fetchedSenderName,
+                busData['business_data']?['name'],
+                busData['businessName'],
+              ], fallback: 'Business User');
 
-              final virtualAccData = busData['getAnchorData']?['virtualAccount']?['data'] as Map<String, dynamic>?;
+              final virtualAccData = getVirtualAccountData(busData);
               if (virtualAccData != null) {
                 fetchedSenderAccountNumber = virtualAccData['attributes']?['accountNumber']?.toString() ?? '';
                 fetchedSenderBankName = virtualAccData['attributes']?['bank']?['name']?.toString() ?? '';
+                fetchedSenderName = _firstNonEmpty([
+                  fetchedSenderName,
+                  virtualAccData['attributes']?['accountName'],
+                ], fallback: fetchedSenderName);
               }
             }
           }
@@ -130,24 +201,33 @@ class _ReceiptPageState extends State<ReceiptPage> {
             final userSnap = await FirebaseFirestore.instance.collection('users').doc(uid).get();
             if (userSnap.exists && userSnap.data() != null) {
               final userData = userSnap.data()!;
-              fetchedSenderName = "${userData['firstName'] ?? ''} ${userData['lastName'] ?? ''}".trim();
-              if (fetchedSenderName.isEmpty) {
-                fetchedSenderName = userData['userName'] ?? 'User';
-              }
+              fetchedSenderName = _firstNonEmpty([
+                fetchedSenderName,
+                "${userData['firstName'] ?? ''} ${userData['lastName'] ?? ''}".trim(),
+                userData['userName'],
+                userData['email'],
+              ], fallback: 'User');
 
-              final anchorData = userData['getAnchorData'] as Map<String, dynamic>?;
-              if (anchorData != null) {
-                final virtualAccount = anchorData['virtualAccount'] as Map<String, dynamic>?;
-                if (virtualAccount != null) {
-                  final vaData = virtualAccount['data'] as Map<String, dynamic>?;
-                  if (vaData != null) {
-                    fetchedSenderAccountNumber = vaData['attributes']?['accountNumber']?.toString() ?? fetchedSenderAccountNumber;
-                    fetchedSenderBankName = vaData['attributes']?['bank']?['name']?.toString() ?? fetchedSenderBankName;
-                  }
-                }
+              final vaData = getVirtualAccountData(userData);
+              if (vaData != null) {
+                fetchedSenderName = _firstNonEmpty([
+                  fetchedSenderName,
+                  vaData['attributes']?['accountName'],
+                ], fallback: fetchedSenderName);
+                fetchedSenderAccountNumber =
+                    vaData['attributes']?['accountNumber']?.toString() ??
+                    fetchedSenderAccountNumber;
+                fetchedSenderBankName =
+                    vaData['attributes']?['bank']?['name']?.toString() ??
+                    fetchedSenderBankName;
               }
             }
           }
+        } else if (isReceivedAnonymously) {
+          fetchedSenderName = _firstNonEmpty([
+            data['senderName'],
+            data['senderAccountName'],
+          ], fallback: 'PadiPay');
         }
 
         // If still empty, try to fetch by accountId from api_response
@@ -155,20 +235,29 @@ class _ReceiptPageState extends State<ReceiptPage> {
           final accountId = data['api_response']?['data']?['relationships']?['account']?['data']?['id']?.toString();
           if (accountId != null && accountId.isNotEmpty) {
             // 1. Try users collection
-            final userQuery = await FirebaseFirestore.instance.collection('users').where('getAnchorData.virtualAccount.data.id', isEqualTo: accountId).get();
+            final userQuery = await FirebaseFirestore.instance.collection('users').where('sudoData.virtualAccount.data.id', isEqualTo: accountId).get();
             if (userQuery.docs.isNotEmpty) {
               final userData = userQuery.docs.first.data();
-              fetchedSenderName = userData['getAnchorData']?['virtualAccount']?['data']?['attributes']?['accountName']?.toString() ?? '';
-              fetchedSenderAccountNumber = userData['getAnchorData']?['virtualAccount']?['data']?['attributes']?['accountNumber']?.toString() ?? '';
-              fetchedSenderBankName = userData['getAnchorData']?['virtualAccount']?['data']?['attributes']?['bank']?['name']?.toString() ?? '';
+              final userVa = getVirtualAccountData(userData);
+              fetchedSenderName = _firstNonEmpty([
+                fetchedSenderName,
+                userVa?['attributes']?['accountName'],
+              ]);
+              fetchedSenderAccountNumber = userVa?['attributes']?['accountNumber']?.toString() ?? '';
+              fetchedSenderBankName = userVa?['attributes']?['bank']?['name']?.toString() ?? '';
             } else {
               // 2. Try businesses collection
-              final businessQuery = await FirebaseFirestore.instance.collection('businesses').where('getAnchorData.virtualAccount.data.id', isEqualTo: accountId).get();
+              final businessQuery = await FirebaseFirestore.instance.collection('businesses').where('sudoData.virtualAccount.data.id', isEqualTo: accountId).get();
               if (businessQuery.docs.isNotEmpty) {
                 final busData = businessQuery.docs.first.data();
-                fetchedSenderName = busData['getAnchorData']?['virtualAccount']?['data']?['attributes']?['accountName']?.toString() ?? '';
-                fetchedSenderAccountNumber = busData['getAnchorData']?['virtualAccount']?['data']?['attributes']?['accountNumber']?.toString() ?? '';
-                fetchedSenderBankName = busData['getAnchorData']?['virtualAccount']?['data']?['attributes']?['bank']?['name']?.toString() ?? '';
+                final busVa = getVirtualAccountData(busData);
+                fetchedSenderName = _firstNonEmpty([
+                  fetchedSenderName,
+                  busVa?['attributes']?['accountName'],
+                  busData['business_data']?['name'],
+                ]);
+                fetchedSenderAccountNumber = busVa?['attributes']?['accountNumber']?.toString() ?? '';
+                fetchedSenderBankName = busVa?['attributes']?['bank']?['name']?.toString() ?? '';
               } else {
                 // 3. Try posStands array in businesses
                 final allBusinesses = await FirebaseFirestore.instance.collection('businesses').get();
@@ -210,12 +299,40 @@ class _ReceiptPageState extends State<ReceiptPage> {
               ? DateFormat("MMMM d, yyyy 'at' h:mm:ss a 'UTC+1'").format(timestamp.toDate())
               : '';
 
+          final isCreditLike =
+              txType == 'deposit' || txType == 'add_money' || txType == 'fund';
+          final recipientName = _firstNonEmpty([
+            data['recipientName'],
+            data['creditAccountName'],
+            data['beneficiaryAccountName'],
+            currentUserName,
+          ]);
+          final recipientAccountNumber = _firstNonEmpty([
+            data['creditAccountNumber'],
+            data['beneficiaryAccountNumber'],
+            data['account_number'],
+            data['accountNumber'],
+            currentUserAccountNumber,
+          ]);
+          final recipientBank = _firstNonEmpty([
+            data['recipientBankName'],
+            data['creditBankName'],
+            data['beneficiaryBankName'],
+            data['bankName'],
+            currentUserBankName,
+          ]);
+
           // ------------------- RECIPIENT / PAYMENT DETAILS -------------------
-          if (transactionType == 'transfer' || transactionType == 'ghost_transfer') {
+          if (transactionType == 'transfer' || transactionType == 'ghost_transfer' || isCreditLike) {
             recipientDetails = [
-              {'label': 'Recipient Name', 'value': data['recipientName'] ?? ''},
-              {'label': 'Bank Name', 'value': data['bankName'] ?? ''},
-              {'label': 'Account Number', 'value': data['account_number'] ?? ''},
+              {'label': 'Recipient Name', 'value': recipientName},
+              {'label': 'Bank Name', 'value': recipientBank},
+              {
+                'label': 'Account Number',
+                'value': recipientAccountNumber.isNotEmpty
+                    ? _maskAccountNumber(recipientAccountNumber)
+                    : '',
+              },
             ];
           } else if (transactionType == 'airtime') {
             recipientDetails = [
@@ -254,14 +371,18 @@ class _ReceiptPageState extends State<ReceiptPage> {
             transactionType = 'atm_payment';
           }
 
-          senderName = fetchedSenderName;
+          senderName = fetchedSenderName.isNotEmpty
+              ? fetchedSenderName
+              : (isSent ? currentUserName : 'Unknown');
           senderAccountNumber = fetchedSenderAccountNumber;
           senderBankName = fetchedSenderBankName;
 
           senderDetails = [
-            {'label': 'Name', 'value': senderName},
-            {'label': 'Bank Name', 'value': senderBankName},
-            {'label': 'Account Number', 'value': _maskAccountNumber(senderAccountNumber)},
+            {'label': 'Sender Name', 'value': senderName},
+            if (senderBankName.isNotEmpty)
+              {'label': 'Bank Name', 'value': senderBankName},
+            if (senderAccountNumber.isNotEmpty)
+              {'label': 'Account Number', 'value': _maskAccountNumber(senderAccountNumber)},
           ];
 
           transactionInfo = [

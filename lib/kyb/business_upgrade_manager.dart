@@ -9,8 +9,8 @@ import 'package:padi_pay_business/home_pages/home_page.dart';
 import 'package:padi_pay_business/kyb/business_docs.dart';
 import 'package:padi_pay_business/kyb/business_info.dart';
 import 'package:padi_pay_business/kyb/contact_and_address.dart';
-import 'package:padi_pay_business/kyb/identity_verification.dart';
 import 'package:padi_pay_business/kyb/rep_details.dart';
+import 'package:padi_pay_business/profile/upgrade_tier.dart' show UpgradeTier;
 import 'package:padi_pay_business/utils.dart';
 
 extension StringExtension on String {
@@ -70,6 +70,17 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
     final userData = userDoc.exists ? (userDoc.data() ?? <String, dynamic>{}) : <String, dynamic>{};
     final qoreData = userData['qoreIdData'] as Map<String, dynamic>? ?? <String, dynamic>{};
     final verification = qoreData['verification'] as Map<String, dynamic>? ?? <String, dynamic>{};
+    final metadata = verification['metadata'] as Map<String, dynamic>? ?? <String, dynamic>{};
+
+    final reusableBvn =
+        (userData['bvn']?.toString().trim().isNotEmpty == true) ||
+        (metadata['idNumber']?.toString().trim().isNotEmpty == true) ||
+        (metadata['bvn']?.toString().trim().isNotEmpty == true);
+    final reusableIdentityData =
+        getWalletContainer(userData)?['customerCreation'] != null;
+    final isQoreMatch = metadata['match'] == true;
+    final isVerificationSubmitted = verification['submitted'] == true;
+    final isIdentityVerified = isQoreMatch || reusableBvn || reusableIdentityData;
 
     setState(() {
       contactFixed = data['contact_fixed'] ?? false;
@@ -78,12 +89,11 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
       docsFixed = data['docs_fixed'] ?? false;
 
       // Identity verification flags
-      idSubmitted = verification['submitted'] == true;
-      // Use metadata.match as the authoritative verification boolean stored by QoreID
-      final metadata = verification['metadata'] as Map<String, dynamic>? ?? <String, dynamic>{};
-      idVerified = metadata['match'] == true;
+      idSubmitted = isVerificationSubmitted || isIdentityVerified;
+      // Accept existing user-app BVN/identity data as reusable verification.
+      idVerified = isIdentityVerified;
       // If metadata.match exists and is false, mark it as a failed verification
-      idFailed = metadata.containsKey('match') && metadata['match'] == false;
+      idFailed = metadata.containsKey('match') && metadata['match'] == false && !isIdentityVerified;
 
       // SAFE CAST: if requiredDocuments is null, not a list, or a map → treat as empty
       final requiredDocsRaw = data['requiredDocuments'];
@@ -262,7 +272,7 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
   }
 
   // ──────────────────────────────────────────────────────────────
-  //  Submit documents using the anchorId saved by webhook
+  //  Submit documents using the sudoId saved by webhook
   // ──────────────────────────────────────────────────────────────── ───────────────────────
   
 
@@ -288,7 +298,7 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
 
       for (var rd in requiredDocsRaw) {
         final String type = rd['type'];
-        final String? anchorId = rd['anchorId'] as String?;
+        final String? sudoId = rd['sudoId'] as String?;
 
         // SKIP if this document is already approved
         if (rd['status'] == "approved") {
@@ -302,7 +312,7 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
 
         final callData = {
           'customerId': customerId,
-          'documentId': anchorId,
+          'documentId': sudoId,
           'textData': fileData['textData'] ?? '',
         };
 
@@ -344,18 +354,14 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
    Future<Map<String, dynamic>> _createBusinessUser(
     Map<String, dynamic> data,
   ) async {
-    final res = await FirebaseFunctions.instance
-        .httpsCallable('createGetanchorBusinessUser')
-        .call(data);
+    final res = await callCloudFunctionLogged('sudoCreateBusinessUser', source: 'business_app', payload: data);
     return res.data;
   }
 
   Future<Map<String, dynamic>> _verifyBusinessCustomer(
     String customerId,
   ) async {
-    final res = await FirebaseFunctions.instance
-        .httpsCallable('verifyBusinessCustomer')
-        .call({'customerId': customerId});
+    final res = await callCloudFunctionLogged('sudoVerifyBusinessCustomer', source: 'business_app', payload: {'customerId': customerId});
     return res.data;
   }
 
@@ -451,7 +457,7 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
                         onTap: () => Navigator.push(
                           context,
                           MaterialPageRoute(
-                            builder: (_) => IdentityVerificationStep1Page(),
+                            builder: (_) => const UpgradeTier(tier: 1),
                           ),
                         ).then((_) => _loadFlags()),
                         child: Container(
@@ -466,7 +472,7 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
                             borderRadius: BorderRadius.circular(25),
                           ),
                           child: Text(
-                            idVerified ? "Verified" : (idFailed ? "Failed, Tap to Retry" : (idSubmitted ? "Submitted" : "Fix Now")),
+                            idVerified ? "Fixed" : (idFailed ? "Failed, Tap to Retry" : (idSubmitted ? "Submitted" : "Fix Now")),
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 12,
@@ -529,7 +535,7 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
                             borderRadius: BorderRadius.circular(25),
                           ),
                           child: Text(
-                            contactFixed ? "Fixed" : (idVerified ? "Fix Now" : "Verify BVN"),
+                            contactFixed ? "Fixed" : (idVerified ? "Fix Now" : "Fix Previous"),
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 12,
@@ -591,7 +597,7 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
                             borderRadius: BorderRadius.circular(25),
                           ),
                           child: Text(
-                            businessFixed ? "Fixed" : (idVerified ? "Fix Now" : "Verify BVN"),
+                            businessFixed ? "Fixed" : (idVerified ? "Fix Now" : "Fix Previous"),
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 12,
@@ -649,7 +655,7 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
                             borderRadius: BorderRadius.circular(25),
                           ),
                           child: Text(
-                            repFixed ? "Fixed" : (idVerified ? "Fix Now" : "Verify BVN"),
+                            repFixed ? "Fixed" : (idVerified ? "Fix Now" : "Fix Previous"),
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 12,
@@ -660,7 +666,7 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
                     ],
                   ),
 
-                  // ==================== DOCUMENTS (only when Anchor tells us) ====================
+                  // ==================== DOCUMENTS (only when Sudo tells us) ====================
                   if (currentKycStatus == "AWAITING_DOCUMENT") ...[
                     const SizedBox(height: 40),
                     Row(
@@ -709,7 +715,7 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
                               borderRadius: BorderRadius.circular(25),
                             ),
                             child: Text(
-                              docsFixed ? "Fixed" : (idVerified ? "Fix Now" : "Verify BVN"),
+                              docsFixed ? "Fixed" : (idVerified ? "Fix Now" : "Fix Previous"),
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 12,

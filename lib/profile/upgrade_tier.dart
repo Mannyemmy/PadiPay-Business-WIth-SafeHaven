@@ -24,6 +24,8 @@ class UpgradeTier extends StatefulWidget {
 
 class _UpgradeTierState extends State<UpgradeTier> {
   final TextEditingController _controller = TextEditingController();
+  final TextEditingController _firstNameController = TextEditingController();
+  final TextEditingController _lastNameController = TextEditingController();
   final TextEditingController _idNumberController = TextEditingController();
   final TextEditingController _expiryController = TextEditingController();
   final TextEditingController _dobController = TextEditingController();
@@ -45,8 +47,17 @@ class _UpgradeTierState extends State<UpgradeTier> {
   // BVN conflict detection
   bool _bvnConflict = false;
   Timer? _bvnCheckTimer;
+  Timer? _bvnVerifyTimer;
   String? _lastQueriedBvn;
   bool _externalBvnMatch = false;
+  bool _isBvnVerifiedLocked = false;
+  bool _bvnVerifying = false;
+  bool? _bvnVerified;
+  String? _bvnVerifyStatus;
+
+  bool get _isIdentityVerificationStep => widget.tier == 1;
+
+  bool get _isBvnTierFlow => widget.tier == 1 || widget.tier == 2;
 
   @override
   void initState() {
@@ -265,12 +276,14 @@ class _UpgradeTierState extends State<UpgradeTier> {
       );
     }
     return GestureDetector(
-      onTap: _isGettingLocation ? null : _getCurrentLocation,
+      onTap: (_isGettingLocation || _isBvnVerifiedLocked) ? null : _getCurrentLocation,
       child: Container(
         padding: EdgeInsets.all(12),
         child: FaIcon(
           FontAwesomeIcons.locationArrow,
-          color: _isGettingLocation ? Colors.grey.shade400 : primaryColor,
+          color: (_isGettingLocation || _isBvnVerifiedLocked)
+              ? Colors.grey.shade400
+              : primaryColor,
           size: 20,
         ),
       ),
@@ -281,15 +294,18 @@ class _UpgradeTierState extends State<UpgradeTier> {
   Widget build(BuildContext context) {
     bool isFormValid;
 
-    if (widget.tier == 2) {
-      final bvnAllowed = !_bvnConflict || _externalBvnMatch;
+    if (_isBvnTierFlow) {
       isFormValid = _controller.text.isNotEmpty &&
+        (_isIdentityVerificationStep
+          ? (_firstNameController.text.isNotEmpty &&
+            _lastNameController.text.isNotEmpty)
+          : true) &&
+        (_bvnVerified == true || _isBvnVerifiedLocked) &&
           _dobController.text.isNotEmpty &&
           _streetController.text.isNotEmpty &&
           selectedState != null &&
           selectedCity != null &&
-          selectedGender != null &&
-          bvnAllowed;
+          selectedGender != null;
     } else {
       isFormValid = ninController.text.isNotEmpty &&
           selectedIdType != null &&
@@ -323,16 +339,20 @@ class _UpgradeTierState extends State<UpgradeTier> {
               ),
               SizedBox(height: 30),
               Text(
-                'Verify Your Identity',
+                _isIdentityVerificationStep
+                    ? 'Verify Your Identity'
+                    : 'Complete Your Profile',
                 style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
               ),
               SizedBox(height: 10),
               Text(
-                "To comply with CBN guidelines, we are required to verify every customer.",
+                _isIdentityVerificationStep
+                    ? 'Confirm your BVN details, verify the OTP sent to your phone, and activate your wallet.'
+                    : 'To comply with CBN guidelines, we are required to verify every customer.',
                 style: TextStyle(color: Colors.grey.shade600),
               ),
               SizedBox(height: 20),
-              if (widget.tier == 2)
+              if (_isBvnTierFlow)
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
@@ -364,7 +384,105 @@ class _UpgradeTierState extends State<UpgradeTier> {
                   ],
                 ),
               SizedBox(height: 20),
-              if (widget.tier == 2) ...[
+              if (_isIdentityVerificationStep) ...[
+                Text(
+                  'First Name',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.black54,
+                  ),
+                ),
+                SizedBox(height: 8),
+                TextField(
+                  controller: _firstNameController,
+                  readOnly: _isBvnVerifiedLocked,
+                  onChanged: _isBvnVerifiedLocked
+                      ? null
+                      : (_) {
+                          if (_bvnVerified != null) {
+                            setState(() {
+                              _bvnVerified = null;
+                              _bvnVerifyStatus = null;
+                            });
+                          }
+                        },
+                  decoration: InputDecoration(
+                    hintText: 'First name',
+                    hintStyle: TextStyle(color: Colors.grey.shade500),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide(color: Colors.grey.shade200),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide(color: Colors.grey.shade200),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide(color: primaryColor, width: 2),
+                    ),
+                    disabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide(color: Colors.grey.shade200),
+                    ),
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 16,
+                    ),
+                  ),
+                ),
+                SizedBox(height: 16),
+                Text(
+                  'Last Name',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.black54,
+                  ),
+                ),
+                SizedBox(height: 8),
+                TextField(
+                  controller: _lastNameController,
+                  readOnly: _isBvnVerifiedLocked,
+                  onChanged: _isBvnVerifiedLocked
+                      ? null
+                      : (_) {
+                          if (_bvnVerified != null) {
+                            setState(() {
+                              _bvnVerified = null;
+                              _bvnVerifyStatus = null;
+                            });
+                          }
+                        },
+                  decoration: InputDecoration(
+                    hintText: 'Last name',
+                    hintStyle: TextStyle(color: Colors.grey.shade500),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide(color: Colors.grey.shade200),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide(color: Colors.grey.shade200),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide(color: primaryColor, width: 2),
+                    ),
+                    disabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: BorderSide(color: Colors.grey.shade200),
+                    ),
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 16,
+                    ),
+                  ),
+                ),
+                SizedBox(height: 20),
+              ],
+              if (_isBvnTierFlow) ...[
                 Text(
                   "BVN",
                   style: TextStyle(
@@ -379,35 +497,109 @@ class _UpgradeTierState extends State<UpgradeTier> {
                   controller: _controller,
                   keyboardType: TextInputType.number,
                   style: TextStyle(color: Colors.black87),
-                  readOnly: _bvnFromQore,
-                  onChanged: _onBvnChanged,
+                  readOnly: _bvnFromQore || _isBvnVerifiedLocked,
+                  onChanged: _isBvnVerifiedLocked ? null : _onBvnChanged,
                   decoration: InputDecoration(
                     counterText: "",
                     hintText: _bvnFromQore ? 'BVN (verification provided)' : 'Enter BVN',
                     hintStyle: TextStyle(color: Colors.grey.shade500),
-                    errorText: (_bvnConflict && !_externalBvnMatch) ? 'BVN already registered with another account' : null,
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(color: (_bvnConflict && !_externalBvnMatch) ? Colors.red : Colors.grey.shade200),
+                      borderSide: BorderSide(color: Colors.grey.shade200),
                     ),
                     enabledBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(color: (_bvnConflict && !_externalBvnMatch) ? Colors.red : Colors.grey.shade200),
+                      borderSide: BorderSide(color: Colors.grey.shade200),
                     ),
                     focusedBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(color: (_bvnConflict && !_externalBvnMatch) ? Colors.red : primaryColor, width: 2),
+                      borderSide: BorderSide(color: primaryColor, width: 2),
                     ),
                     disabledBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
-                      borderSide: BorderSide(color: (_bvnConflict && !_externalBvnMatch) ? Colors.red : Colors.grey.shade200),
+                      borderSide: BorderSide(color: Colors.grey.shade200),
                     ),
                     contentPadding: EdgeInsets.symmetric(
                       horizontal: 16,
                       vertical: 16,
                     ),
+                    suffixIcon: _isBvnTierFlow
+                        ? _bvnVerifying
+                            ? Padding(
+                                padding: const EdgeInsets.all(14.0),
+                                child: SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    valueColor:
+                                        AlwaysStoppedAnimation<Color>(
+                                      primaryColor,
+                                    ),
+                                  ),
+                                ),
+                              )
+                            : _bvnVerified == true
+                                ? Icon(
+                                    Icons.check_circle,
+                                    color: Colors.green,
+                                  )
+                                : _bvnVerified == false
+                                    ? Icon(
+                                        Icons.cancel,
+                                        color: Colors.red,
+                                      )
+                                    : null
+                        : null,
                   ),
                 ),
+                SizedBox(height: 6),
+                if (_bvnVerifying)
+                  Text(
+                    'Verifying BVN, please wait...',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey.shade500,
+                    ),
+                  )
+                else if (_bvnVerified == true)
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.check_circle_outline,
+                        size: 14,
+                        color: Colors.green.shade600,
+                      ),
+                      SizedBox(width: 4),
+                      Text(
+                        'BVN verified',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.green.shade700,
+                        ),
+                      ),
+                    ],
+                  )
+                else if (_bvnVerified == false)
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.cancel_outlined,
+                        size: 14,
+                        color: Colors.red.shade600,
+                      ),
+                      SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          _bvnVerifyStatus ?? 'Unable to verify BVN',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.red.shade700,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
                 SizedBox(height: 20),
                 Text(
                   'Date of Birth',
@@ -422,7 +614,7 @@ class _UpgradeTierState extends State<UpgradeTier> {
                   controller: _dobController,
                   keyboardType: TextInputType.datetime,
                   style: TextStyle(color: Colors.black87),
-                  onChanged: (_) => setState(() {}),
+                  onChanged: _isBvnVerifiedLocked ? null : (_) => setState(() {}),
                   decoration: InputDecoration(
                     hintText: 'DD-MM-YYYY',
                     hintStyle: TextStyle(color: Colors.grey.shade500),
@@ -448,7 +640,7 @@ class _UpgradeTierState extends State<UpgradeTier> {
                     ),
                   ),
                   readOnly: true,
-                  onTap: () => _selectDob(context),
+                  onTap: _isBvnVerifiedLocked ? null : () => _selectDob(context),
                 ),
                 SizedBox(height: 20),
                 Text(
@@ -479,7 +671,9 @@ class _UpgradeTierState extends State<UpgradeTier> {
                       items: ['Male', 'Female', 'Others']
                           .map((g) => DropdownMenuItem(value: g, child: Text(g)))
                           .toList(),
-                      onChanged: (val) {
+                      onChanged: _isBvnVerifiedLocked
+                          ? null
+                          : (val) {
                         setState(() {
                           selectedGender = val;
                         });
@@ -500,7 +694,7 @@ class _UpgradeTierState extends State<UpgradeTier> {
                 TextField(
                   controller: _streetController,
                   style: TextStyle(color: Colors.black87),
-                  onChanged: (_) => setState(() {}),
+                  onChanged: _isBvnVerifiedLocked ? null : (_) => setState(() {}),
                   decoration: InputDecoration(
                     hintText: 'Enter Street Address',
                     hintStyle: TextStyle(color: Colors.grey.shade500),
@@ -552,7 +746,9 @@ class _UpgradeTierState extends State<UpgradeTier> {
                       items: states
                           .map((s) => DropdownMenuItem(value: s, child: Text(s)))
                           .toList(),
-                      onChanged: (val) {
+                      onChanged: _isBvnVerifiedLocked
+                          ? null
+                          : (val) {
                         setState(() {
                           selectedState = val;
                         });
@@ -590,7 +786,9 @@ class _UpgradeTierState extends State<UpgradeTier> {
                       items: cities
                           .map((c) => DropdownMenuItem(value: c, child: Text(c)))
                           .toList(),
-                      onChanged: (val) {
+                      onChanged: _isBvnVerifiedLocked
+                          ? null
+                          : (val) {
                         setState(() {
                           selectedCity = val;
                         });
@@ -777,7 +975,9 @@ class _UpgradeTierState extends State<UpgradeTier> {
                   child: _isLoading
                       ? CircularProgressIndicator(color: Colors.white)
                       : Text(
-                          'Upgrade Account',
+                        _isIdentityVerificationStep
+                          ? 'Verify and Continue'
+                          : 'Upgrade Account',
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.w600,
@@ -835,6 +1035,21 @@ class _UpgradeTierState extends State<UpgradeTier> {
     return '${parts[2]}-${parts[1]}-${parts[0]}';
   }
 
+  bool _isTruthy(dynamic value) {
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    if (value is String) {
+      final normalized = value.trim().toLowerCase();
+      return normalized == 'true' ||
+          normalized == '1' ||
+          normalized == 'yes' ||
+          normalized == 'verified' ||
+          normalized == 'success' ||
+          normalized == 'approved';
+    }
+    return false;
+  }
+
   Future<String?> _tryMatchExistingCustomerByBvn(String? bvn, DocumentReference docRef, String uid) async {
     if (bvn == null) return null;
     final bvnToMatch = bvn.replaceAll(RegExp(r'\D'), '').trim();
@@ -867,7 +1082,7 @@ class _UpgradeTierState extends State<UpgradeTier> {
 
             try {
               final Map<String, dynamic> updateMap = {
-                'getAnchorData.customerCreation': {'data': it},
+                'sudoData.customerCreation': {'data': it},
               };
 
               final Map<String, dynamic>? verification = (attrs['verification'] is Map)
@@ -875,7 +1090,7 @@ class _UpgradeTierState extends State<UpgradeTier> {
                   : null;
 
               if (verification != null) {
-                updateMap['getAnchorData.upgradeKyc'] = {
+                updateMap['sudoData.upgradeKyc'] = {
                   'status': 'success',
                   'data': verification,
                 };
@@ -883,7 +1098,7 @@ class _UpgradeTierState extends State<UpgradeTier> {
                 final verLevel = (verification['level']?.toString() ?? '').toUpperCase();
                 final verStatus = (verification['status']?.toString() ?? '').toLowerCase();
                 if (verLevel == 'TIER_2' || verStatus == 'approved') {
-                  updateMap['getAnchorData.tier'] = 2;
+                  updateMap['sudoData.tier'] = 2;
                 }
               }
 
@@ -896,12 +1111,10 @@ class _UpgradeTierState extends State<UpgradeTier> {
             // Attempt to create electronic account for this customer
             try {
               print('Attempting to create electronic account for customer: $foundId');
-              final createVaRes = await functions
-                  .httpsCallable('createElectronicAccount')
-                  .call({'customerId': foundId, 'userId': uid, 'currency': 'NGN', 'type': 'IndividualCustomer', 'idempotencyKey': const Uuid().v4()});
+              final createVaRes = await callCloudFunctionLogged('sudoCreateSubAccount', source: 'business_app', functions: functions, payload: {'customerId': foundId, 'userId': uid, 'currency': 'NGN', 'type': 'IndividualCustomer', 'idempotencyKey': const Uuid().v4()});
               if (createVaRes.data != null) {
                 final vaUpdate = {
-                  'getAnchorData.virtualAccount': createVaRes.data,
+                  'sudoData.virtualAccount': createVaRes.data,
                 };
 
                 final Map<String, dynamic>? verificationMap = (attrs['verification'] is Map)
@@ -910,13 +1123,13 @@ class _UpgradeTierState extends State<UpgradeTier> {
                 final bool verTier2OrApproved = verificationMap != null && ((verificationMap['level']?.toString().toUpperCase() == 'TIER_2') || (verificationMap['status']?.toString().toLowerCase() == 'approved'));
 
                 if (!verTier2OrApproved) {
-                  vaUpdate['getAnchorData.tier'] = 2;
+                  vaUpdate['sudoData.tier'] = widget.tier;
                 }
 
                 await docRef.update(vaUpdate);
                 print('Created and saved electronic account for user $uid');
               } else {
-                print('createElectronicAccount returned no data for $foundId');
+                print('sudoCreateSubAccount returned no data for $foundId');
               }
             } catch (e) {
               print('Failed to create electronic account for $foundId: $e');
@@ -949,21 +1162,50 @@ class _UpgradeTierState extends State<UpgradeTier> {
       final verification = qore?['verification'] as Map<String, dynamic>?;
       final metadata = verification?['metadata'] as Map<String, dynamic>?;
       final idNumber = metadata?['idNumber']?.toString();
+      final normalizedIdNumber = idNumber?.replaceAll(RegExp(r'\D'), '').trim();
+      final bool isQoreVerified =
+          _isTruthy(verification?['verified']) ||
+          _isTruthy(verification?['verificationSuccessful']) ||
+          _isTruthy(verification?['verificationSuccess']) ||
+          _isTruthy(metadata?['match']) ||
+          _isTruthy(metadata?['verified']);
+      final String fallbackBvn = data['bvn']?.toString() ?? '';
+      final String firstName =
+          (data['firstName'] ?? data['fullName'] ?? '').toString().trim();
+      final String lastName = (data['lastName'] ?? '').toString().trim();
       if (!mounted) return;
       setState(() {
         if (idNumber != null && idNumber.isNotEmpty) {
           _controller.text = idNumber;
           _bvnFromQore = true;
+        } else if (fallbackBvn.isNotEmpty) {
+          _controller.text = fallbackBvn;
+          _bvnFromQore = isQoreVerified;
         } else {
           _bvnFromQore = false;
         }
+        if (firstName.isNotEmpty && _firstNameController.text != firstName) {
+          _firstNameController.text = firstName;
+        }
+        if (lastName.isNotEmpty && _lastNameController.text != lastName) {
+          _lastNameController.text = lastName;
+        }
+
+        final activeBvn = _controller.text.replaceAll(RegExp(r'\D'), '').trim();
+        _isBvnVerifiedLocked =
+            isQoreVerified &&
+            normalizedIdNumber != null &&
+            normalizedIdNumber.isNotEmpty &&
+            normalizedIdNumber == activeBvn;
+        if (_isBvnVerifiedLocked) {
+          _bvnVerified = true;
+          _bvnVerifyStatus = 'BVN already verified';
+        }
       });
       _populateFieldsFromDoc(data);
-      if (idNumber != null && idNumber.isNotEmpty) {
-        _checkBvnConflict(idNumber);
-        _maybeFetchGetAnchorByBvn(idNumber);
-      } else {
-        _checkBvnConflict('');
+      final bvnForLookup = (idNumber ?? fallbackBvn).trim();
+      if (bvnForLookup.isNotEmpty) {
+        _maybeFetchGetSudoByBvn(bvnForLookup);
       }
     });
   }
@@ -983,8 +1225,7 @@ class _UpgradeTierState extends State<UpgradeTier> {
         candidate = metadata?['idNumber']?.toString();
       }
       if (candidate != null && candidate.isNotEmpty) {
-        await _checkBvnConflict(candidate);
-        _maybeFetchGetAnchorByBvn(candidate);
+        _maybeFetchGetSudoByBvn(candidate);
       }
     } catch (e) {
       print('Error during initial BVN conflict check: $e');
@@ -1021,15 +1262,96 @@ class _UpgradeTierState extends State<UpgradeTier> {
   }
 
   void _onBvnChanged(String val) {
+    if (_isBvnVerifiedLocked) return;
+
+    final normalizedVal = val.replaceAll(RegExp(r'\D'), '');
+
+    _bvnVerifyTimer?.cancel();
     _bvnCheckTimer?.cancel();
-    _bvnCheckTimer = Timer(const Duration(milliseconds: 500), () {
-      _checkBvnConflict(val);
-      _maybeFetchGetAnchorByBvn(val);
-    });
-    if (val.isEmpty || val.length != 11) {
-      if (_externalBvnMatch) setState(() => _externalBvnMatch = false);
+    _bvnCheckTimer = Timer(
+      const Duration(milliseconds: 500),
+      () => _maybeFetchGetSudoByBvn(normalizedVal),
+    );
+
+    if (normalizedVal.length == 11) {
+      _bvnVerifyTimer = Timer(
+        const Duration(milliseconds: 350),
+        () => _verifyBvnLive(normalizedVal),
+      );
+    } else {
+      if (_externalBvnMatch || _bvnVerified != null || _bvnVerifyStatus != null) {
+        setState(() {
+          _externalBvnMatch = false;
+          _bvnVerified = null;
+          _bvnVerifyStatus = null;
+          _bvnVerifying = false;
+        });
+      }
     }
+
     setState(() {});
+  }
+
+  Future<void> _verifyBvnLive(String bvn) async {
+    if (_isBvnVerifiedLocked) return;
+    if (bvn.length != 11) return;
+
+    if (mounted) {
+      setState(() {
+        _bvnVerifying = true;
+        _bvnVerified = null;
+        _bvnVerifyStatus = null;
+      });
+    }
+
+    try {
+      await _maybeFetchGetSudoByBvn(bvn);
+
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid == null) {
+        if (!mounted) return;
+        setState(() {
+          _bvnVerifying = false;
+          _bvnVerified = _externalBvnMatch;
+          _bvnVerifyStatus = _externalBvnMatch
+              ? 'BVN verified'
+              : 'Unable to verify BVN';
+        });
+        return;
+      }
+
+      final snap = await FirebaseFirestore.instance.collection('users').doc(uid).get();
+      final data = snap.data() ?? <String, dynamic>{};
+      final qore = data['qoreIdData'] as Map<String, dynamic>?;
+      final verification = qore?['verification'] as Map<String, dynamic>?;
+      final metadata = verification?['metadata'] as Map<String, dynamic>?;
+      final qoreBvn = (metadata?['idNumber'] ?? '')
+          .toString()
+          .replaceAll(RegExp(r'\D'), '')
+          .trim();
+
+      final bool qoreMatch =
+          (_isTruthy(verification?['verified']) || _isTruthy(metadata?['match'])) &&
+              qoreBvn == bvn;
+      final bool verified = qoreMatch || _externalBvnMatch;
+
+      if (!mounted) return;
+      setState(() {
+        _bvnVerifying = false;
+        _bvnVerified = verified;
+        _bvnVerifyStatus = verified ? 'BVN verified' : 'Unable to verify BVN';
+        if (qoreMatch) {
+          _isBvnVerifiedLocked = true;
+        }
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _bvnVerifying = false;
+        _bvnVerified = false;
+        _bvnVerifyStatus = 'Unable to verify BVN';
+      });
+    }
   }
 
   String _formatDateFromApi(String date) {
@@ -1040,13 +1362,22 @@ class _UpgradeTierState extends State<UpgradeTier> {
 
   void _populateFieldsFromDoc(Map<String, dynamic>? data) {
     if (data == null) return;
+    final firstName = data['firstName']?.toString().trim();
+    final lastName = data['lastName']?.toString().trim();
+    if (firstName != null && firstName.isNotEmpty && _firstNameController.text != firstName) {
+      _firstNameController.text = firstName;
+    }
+    if (lastName != null && lastName.isNotEmpty && _lastNameController.text != lastName) {
+      _lastNameController.text = lastName;
+    }
+
     final bvn = data['bvn']?.toString();
     if (bvn != null && bvn.isNotEmpty && _controller.text != bvn) _controller.text = bvn;
     final nin = data['nin']?.toString();
     if (nin != null && nin.isNotEmpty && ninController.text != nin) ninController.text = nin;
     String? dob = data['dateOfBirth']?.toString();
-    if ((dob == null || dob.isEmpty) && data['getAnchorData'] is Map) {
-      final gc = (data['getAnchorData'] as Map)['customerCreation'] as Map<String, dynamic>?;
+    if ((dob == null || dob.isEmpty) && data['sudoData'] is Map) {
+      final gc = (data['sudoData'] as Map)['customerCreation'] as Map<String, dynamic>?;
       final cdata = gc?['data'] as Map<String, dynamic>?;
       dob = cdata?['dateOfBirth']?.toString() ?? cdata?['dob']?.toString();
       if ((dob == null || dob.isEmpty) && cdata != null && cdata['attributes'] is Map) {
@@ -1059,8 +1390,8 @@ class _UpgradeTierState extends State<UpgradeTier> {
       if (_dobController.text != display) _dobController.text = display;
     }
     String? gender = data['gender']?.toString();
-    if ((gender == null || gender.isEmpty) && data['getAnchorData'] is Map) {
-      final gc = (data['getAnchorData'] as Map)['customerCreation'] as Map<String, dynamic>?;
+    if ((gender == null || gender.isEmpty) && data['sudoData'] is Map) {
+      final gc = (data['sudoData'] as Map)['customerCreation'] as Map<String, dynamic>?;
       final cdata = gc?['data'] as Map<String, dynamic>?;
       if (cdata != null) {
         gender = cdata['gender']?.toString();
@@ -1070,12 +1401,46 @@ class _UpgradeTierState extends State<UpgradeTier> {
     if (gender != null && gender.isNotEmpty && selectedGender != gender) {
       setState(() => selectedGender = gender);
     }
-    if (data['getAnchorData'] is Map) {
+
+    final address = data['address'] as Map<String, dynamic>?;
+    final street = address?['street']?.toString();
+    final city = address?['city']?.toString();
+    String? state = address?['state']?.toString();
+
+    if ((state == null || state.isEmpty) && data['sudoData'] is Map) {
+      final gc = (data['sudoData'] as Map)['customerCreation'] as Map<String, dynamic>?;
+      final cdata = gc?['data'] as Map<String, dynamic>?;
+      if (cdata != null && cdata['attributes'] is Map) {
+        final attrs = cdata['attributes'] as Map<String, dynamic>;
+        state = attrs['state']?.toString();
+      }
+    }
+
+    if (street != null && street.isNotEmpty && _streetController.text != street) {
+      _streetController.text = street;
+    }
+
+    final normalizedState = state != null && state.isNotEmpty ? (_getStateFromName(state) ?? state) : null;
+    if (normalizedState != null && normalizedState.isNotEmpty && selectedState != normalizedState) {
+      selectedState = normalizedState;
+      _fetchCities(normalizedState).then((_) {
+        if (!mounted) return;
+        if (city != null && city.isNotEmpty && cities.contains(city)) {
+          setState(() => selectedCity = city);
+        }
+      });
+    }
+
+    if ((selectedCity == null || selectedCity!.isEmpty) && city != null && city.isNotEmpty) {
+      selectedCity = city;
+    }
+
+    if (data['sudoData'] is Map) {
       if (!_externalBvnMatch && mounted) setState(() => _externalBvnMatch = true);
     }
   }
 
-  Future<void> _maybeFetchGetAnchorByBvn(String bvn) async {
+  Future<void> _maybeFetchGetSudoByBvn(String bvn) async {
     if (bvn.isEmpty || bvn.length != 11) {
       if (_externalBvnMatch) setState(() => _externalBvnMatch = false);
       return;
@@ -1120,7 +1485,7 @@ class _UpgradeTierState extends State<UpgradeTier> {
       final uid = FirebaseAuth.instance.currentUser?.uid;
       if (uid == null) return;
       final docRef = FirebaseFirestore.instance.collection('users').doc(uid);
-      await docRef.update({'getAnchorData.customerCreation': {'data': matchedCustomer}});
+      await docRef.update({'sudoData.customerCreation': {'data': matchedCustomer}});
       try {
         final refreshed = await docRef.get();
         _populateFieldsFromDoc(refreshed.data());
@@ -1171,10 +1536,14 @@ class _UpgradeTierState extends State<UpgradeTier> {
         return;
       }
 
-      if (widget.tier == 2) {
-        // Validate required fields for Tier 2
-        String? firstName = userData['firstName'];
-        String? lastName = userData['lastName'];
+      if (_isBvnTierFlow) {
+        // Validate required fields for Tier 1/Tier 2 BVN flow
+        String? firstName = _firstNameController.text.trim().isNotEmpty
+          ? _firstNameController.text.trim()
+          : userData['firstName'];
+        String? lastName = _lastNameController.text.trim().isNotEmpty
+          ? _lastNameController.text.trim()
+          : userData['lastName'];
         String? email = userData['email'];
         String? phoneNumber = userData['phone']?.replaceFirst('+234', '');
 
@@ -1247,7 +1616,7 @@ class _UpgradeTierState extends State<UpgradeTier> {
           return;
         }
 
-        // Prepare Tier 2 data
+        // Prepare Tier 1/Tier 2 data
         String formattedDateForApi = _formatDateForApi(_dobController.text);
         String gender = selectedGender!;
         String street = _streetController.text;
@@ -1257,6 +1626,8 @@ class _UpgradeTierState extends State<UpgradeTier> {
 
         // Save Tier 2 data to Firestore
         Map<String, dynamic> updateData = {
+          'firstName': firstName,
+          'lastName': lastName,
           'bvn': _controller.text,
           'dateOfBirth': formattedDateForApi,
           'gender': gender,
@@ -1270,7 +1641,7 @@ class _UpgradeTierState extends State<UpgradeTier> {
         };
         await docRef.update(updateData);
 
-        // Create/Get existing Getanchor Customer (try fetchAllCustomers by BVN first)
+        // Create/Get existing Sudo Customer (try fetchAllCustomers by BVN first)
         final functions = FirebaseFunctions.instance;
         String? customerId;
         try {
@@ -1279,7 +1650,6 @@ class _UpgradeTierState extends State<UpgradeTier> {
             customerId = matched;
             print('Matched existing customer $customerId; proceeding with KYC/VA steps');
           } else {
-            HttpsCallable createUserFunc = functions.httpsCallable('createGetanchorUser');
             final payload = {
               'firstName': firstName,
               'lastName': lastName,
@@ -1291,14 +1661,19 @@ class _UpgradeTierState extends State<UpgradeTier> {
               'postalCode': postalCode,
               'phoneNumber': phoneNumber,
             };
-            print('Sending createGetanchorUser payload: $payload');
-            final createUserResult = await createUserFunc.call(payload);
-            print('Create Getanchor User Response: ${createUserResult.data}');
+            print('Sending sudoCreateUser payload: $payload');
+            final createUserResult = await callCloudFunctionLogged(
+              'sudoCreateUser',
+              source: 'profile/upgrade_tier.dart',
+              functions: functions,
+              payload: payload,
+            );
+            print('Create Sudo User Response: ${createUserResult.data}');
             customerId = createUserResult.data['data']['id'];
 
             // Save customer creation response
             await docRef.update({
-              'getAnchorData.customerCreation': createUserResult.data,
+              'sudoData.customerCreation': createUserResult.data,
             });
           }
         } catch (e) {
@@ -1312,58 +1687,67 @@ class _UpgradeTierState extends State<UpgradeTier> {
           return;
         }
 
-        // Attempt KYC upgrade for Tier 2 (if we have a customerId) but skip if upgrade already succeeded
-        if (customerId != null && customerId.isNotEmpty) {
-          // re-fetch to check for existing upgradeKyc
-          final refreshed = await docRef.get();
-          final Map<String, dynamic>? refreshedMap = refreshed.data() as Map<String, dynamic>?;
-          final Map<String, dynamic>? storedUpgrade = (refreshedMap != null && refreshedMap['getAnchorData'] is Map)
-              ? (refreshedMap['getAnchorData'] as Map<String, dynamic>)['upgradeKyc'] as Map<String, dynamic>?
-              : null;
-
-          final bool upgradeKycPreviouslySucceeded = storedUpgrade != null &&
-              (storedUpgrade['success'] == true ||
-                  (storedUpgrade['status']?.toString().toLowerCase() == 'success') ||
-                  (storedUpgrade['data'] is Map && (storedUpgrade['data']['success'] == true)));
-
-          if (!upgradeKycPreviouslySucceeded) {
-            HttpsCallable upgradeKycFunc = functions.httpsCallable('upgradeCustomerKyc');
-            final kycPayload = {
-              'customerId': customerId,
-              'level': 'TIER_2',
-              'bvn': _controller.text,
-              'dateOfBirth': formattedDateForApi,
-              'gender': gender,
-            };
-            print('Sending upgradeCustomerKyc payload: $kycPayload');
-            final upgradeKycResult = await upgradeKycFunc.call(kycPayload);
-            print('Upgrade Customer KYC Response: ${upgradeKycResult.data}');
-            await docRef.update({
-              'getAnchorData.upgradeKyc': upgradeKycResult.data,
-            });
-          } else {
-            print('Skipping KYC upgrade: previous upgrade succeeded');
-          }
-        } else {
-          print('No customerId available for KYC upgrade');
-        }
-
         // Create Electronic Account (if not already created)
         final refreshedAfterKyc = await docRef.get();
         final Map<String, dynamic>? refreshedAfterMap = refreshedAfterKyc.data() as Map<String, dynamic>?;
-        final existingVa = refreshedAfterMap != null ? (refreshedAfterMap['getAnchorData'] is Map ? (refreshedAfterMap['getAnchorData'] as Map<String, dynamic>)['virtualAccount'] : null) : null;
+        final existingVa = refreshedAfterMap != null ? (refreshedAfterMap['sudoData'] is Map ? (refreshedAfterMap['sudoData'] as Map<String, dynamic>)['virtualAccount'] : null) : null;
         if (existingVa != null) {
           print('Electronic account already exists, skipping creation');
-          final currentTier = refreshedAfterMap != null && refreshedAfterMap['getAnchorData'] is Map ? (refreshedAfterMap['getAnchorData'] as Map<String, dynamic>)['tier'] : null;
-          if (currentTier != 2) {
-            await docRef.update({'getAnchorData.tier': 2});
+          final currentTier = refreshedAfterMap != null && refreshedAfterMap['sudoData'] is Map ? (refreshedAfterMap['sudoData'] as Map<String, dynamic>)['tier'] : null;
+          if (currentTier != widget.tier) {
+            await docRef.update({'sudoData.tier': widget.tier});
           }
         } else {
+          // Identity verification (BVN OTP) required before creating subaccount
+          if (customerId != null && customerId.isNotEmpty && _controller.text.trim().length == 11) {
+            try {
+              final initiateResult = await callCloudFunctionLogged(
+                'sudoInitiateIdentityVerification',
+                source: 'profile/upgrade_tier.dart',
+                functions: functions,
+                payload: {'type': 'BVN', 'number': _controller.text.trim()},
+              );
+              final String? identityId =
+                  initiateResult.data?['data']?['identityId']?.toString();
+              print('sudoInitiateIdentityVerification identityId: $identityId');
+
+              setState(() => _isLoading = false);
+              final String? otp = await _showIdentityOtpBottomSheet();
+              if (otp == null || otp.isEmpty) {
+                showToast('Identity verification cancelled', Colors.red);
+                setState(() => _isLoading = false);
+                return;
+              }
+              setState(() => _isLoading = true);
+
+              await callCloudFunctionLogged(
+                'sudoValidateIdentityVerification',
+                source: 'profile/upgrade_tier.dart',
+                functions: functions,
+                payload: {
+                  'identityId': identityId ?? '',
+                  'type': 'BVN',
+                  'otp': otp,
+                },
+              );
+              print('sudoValidateIdentityVerification completed');
+            } on FirebaseFunctionsException catch (e) {
+              print('Identity verification error: ${e.message}');
+              showToast(e.message ?? 'Identity verification failed', Colors.red);
+              setState(() => _isLoading = false);
+              return;
+            } catch (e) {
+              print('Identity verification error: $e');
+              showToast('Identity verification failed', Colors.red);
+              setState(() => _isLoading = false);
+              return;
+            }
+          }
+
           if (customerId == null || customerId.isEmpty) {
             print('No customerId available to create electronic account');
           } else {
             try {
-              HttpsCallable createAccountFunc = functions.httpsCallable('createElectronicAccount');
               final idempotencyKey = Uuid().v4();
               final accountPayload = {
                 'customerId': customerId,
@@ -1371,15 +1755,20 @@ class _UpgradeTierState extends State<UpgradeTier> {
                 "type": "IndividualCustomer",
                 'idempotencyKey': idempotencyKey,
               };
-              print('Sending createElectronicAccount payload: $accountPayload');
-              final createAccountResult = await createAccountFunc.call(accountPayload);
+              print('Sending sudoCreateSubAccount payload: $accountPayload');
+              final createAccountResult = await callCloudFunctionLogged(
+                'sudoCreateSubAccount',
+                source: 'profile/upgrade_tier.dart',
+                functions: functions,
+                payload: accountPayload,
+              );
               print('Create Electronic Account Response: ${createAccountResult.data}');
               await docRef.update({
-                'getAnchorData.virtualAccount': createAccountResult.data,
+                'sudoData.virtualAccount': createAccountResult.data,
               });
 
               // Save tier
-              await docRef.update({'getAnchorData.tier': widget.tier});
+              await docRef.update({'sudoData.tier': widget.tier});
             } catch (e) {
               print('Error creating electronic account: $e');
             }
@@ -1388,7 +1777,7 @@ class _UpgradeTierState extends State<UpgradeTier> {
       } else {
         // Tier 3: Only call upgradeCustomerKyc and update Firestore
         // Get customerId
-        String? customerId = userData['getAnchorData']?['customerCreation']?['data']?['id'];
+        String? customerId = userData['sudoData']?['customerCreation']?['data']?['id'];
         if (customerId == null) {
           print('Error: customerId not found in Firestore');
           showToast('Customer ID not found. Please complete Tier 2 first.', Colors.red);
@@ -1407,25 +1796,8 @@ class _UpgradeTierState extends State<UpgradeTier> {
         };
         await docRef.update(updateData);
 
-        // Call upgradeCustomerKyc for Tier 3
-        final functions = FirebaseFunctions.instance;
-        HttpsCallable upgradeKycFunc = functions.httpsCallable('upgradeCustomerKyc');
-        final kycPayload = {
-          'customerId': customerId,
-          'level': 'TIER_3',
-          'idType': selectedIdType,
-          'idNumber': _idNumberController.text,
-          'expiryDate': _formatDateForApi(_expiryController.text),
-        };
-        print('Sending upgradeCustomerKyc payload: $kycPayload');
-        final upgradeKycResult = await upgradeKycFunc.call(kycPayload);
-        print('Upgrade Customer KYC Response: ${upgradeKycResult.data}');
-
-        // Update Firestore with KYC response and tier
-        await docRef.update({
-          'getAnchorData.upgradeKyc': upgradeKycResult.data,
-          'getAnchorData.tier': widget.tier,
-        });
+        // Save tier
+        await docRef.update({'sudoData.tier': widget.tier});
       }
 
       print('✅ Account upgraded successfully');
@@ -1439,6 +1811,143 @@ class _UpgradeTierState extends State<UpgradeTier> {
         _isLoading = false;
       });
     }
+  }
+
+  /// Shows an OTP input bottom sheet for identity verification.
+  Future<String?> _showIdentityOtpBottomSheet() async {
+    final otpController = TextEditingController();
+    String? errorText;
+
+    final result = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: StatefulBuilder(
+            builder: (ctx, setModalState) {
+              return SingleChildScrollView(
+                padding: EdgeInsets.only(
+                  left: 16,
+                  right: 16,
+                  top: 20,
+                  bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 40,
+                        height: 4,
+                        margin: const EdgeInsets.only(bottom: 16),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade300,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                    const Text(
+                      'Verify Your Identity',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'An OTP has been sent to your registered phone number. Enter it below to verify your BVN.',
+                      style: TextStyle(color: Colors.grey.shade600, fontSize: 14),
+                    ),
+                    const SizedBox(height: 20),
+                    TextFormField(
+                      controller: otpController,
+                      keyboardType: TextInputType.number,
+                      maxLength: 6,
+                      autofocus: true,
+                      decoration: InputDecoration(
+                        labelText: 'Enter OTP',
+                        hintText: '6-digit OTP',
+                        counterText: '',
+                        errorText: errorText,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide(color: Colors.grey.shade300),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide(color: Colors.grey.shade300),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide(color: primaryColor, width: 2),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: primaryColor,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                        onPressed: () {
+                          final otp = otpController.text.trim();
+                          if (otp.length < 4) {
+                            setModalState(() {
+                              errorText = 'Please enter a valid OTP';
+                            });
+                            return;
+                          }
+                          Navigator.pop(ctx, otp);
+                        },
+                        child: const Text(
+                          'Verify',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+    otpController.dispose();
+    return result;
+  }
+
+  @override
+  void dispose() {
+    _userDocSub?.cancel();
+    _bvnCheckTimer?.cancel();
+    _bvnVerifyTimer?.cancel();
+    _controller.dispose();
+    _firstNameController.dispose();
+    _lastNameController.dispose();
+    _idNumberController.dispose();
+    _expiryController.dispose();
+    _dobController.dispose();
+    _streetController.dispose();
+    ninController.dispose();
+    super.dispose();
   }
 
   @override

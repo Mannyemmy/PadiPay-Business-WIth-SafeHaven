@@ -73,9 +73,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
         });
       }
       if (bankList.isEmpty) {
-        final result = await FirebaseFunctions.instance
-            .httpsCallable('getAllBanks')
-            .call();
+        final result = await callCloudFunctionLogged('sudoBankList', source: 'business_app');
         final data = result.data as Map<String, dynamic>;
         final apiBankList = data['data'] as List<dynamic>;
         final batch = FirebaseFirestore.instance.batch();
@@ -102,7 +100,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
         isFetchingBanks = false;
       });
     } catch (e) {
-      debugPrint('getAllBanks error: $e');
+      debugPrint('sudoBankList error: $e');
       setState(() => isFetchingBanks = false);
     }
   }
@@ -227,7 +225,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
           if (userDoc.exists) {
             final data = userDoc.data();
             debugPrint('Found user $uid, userName: ${data?['userName']}');
-            final vaData = data?['getAnchorData']?['virtualAccount']?['data'];
+            final vaData = data?['sudoData']?['virtualAccount']?['data'];
             if (vaData != null) {
               info = {'uid': uid, 'data': data, 'collection': 'users'};
             } else {
@@ -251,7 +249,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
             'Business ${doc.id}: original "$businessName" (normalized: "$normalizedBusinessName")',
           );
           if (normalizedBusinessName == normalizedInput) {
-            final vaData = data['getAnchorData']?['virtualAccount']?['data'];
+            final vaData = data['sudoData']?['virtualAccount']?['data'];
             if (vaData != null) {
               info = {'uid': doc.id, 'data': data, 'collection': 'businesses'};
               debugPrint('Matched business ${doc.id}');
@@ -276,7 +274,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
       }
       if (info != null) {
         final data = info['data'];
-        final vaData = data['getAnchorData']?['virtualAccount']?['data'];
+        final vaData = data['sudoData']?['virtualAccount']?['data'];
         final attributes = vaData?['attributes'] as Map<String, dynamic>? ?? {};
         String displayName;
         if (info['collection'] == 'users') {
@@ -324,11 +322,11 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
     final userQuery = await FirebaseFirestore.instance
         .collection('users')
         .where(
-          'getAnchorData.virtualAccount.data.attributes.accountNumber',
+          'sudoData.virtualAccount.data.attributes.accountNumber',
           isEqualTo: accNum,
         )
         .where(
-          'getAnchorData.virtualAccount.data.attributes.bank.id',
+          'sudoData.virtualAccount.data.attributes.bank.id',
           isEqualTo: bankId,
         )
         .limit(1)
@@ -336,7 +334,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
     if (userQuery.docs.isNotEmpty) {
       final doc = userQuery.docs.first;
       final data = doc.data();
-      final vaData = data['getAnchorData']?['virtualAccount']?['data'];
+      final vaData = data['sudoData']?['virtualAccount']?['data'];
       if (vaData != null) {
         return {'uid': doc.id, 'data': data, 'collection': 'users'};
       }
@@ -345,11 +343,11 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
     final busQuery = await FirebaseFirestore.instance
         .collection('businesses')
         .where(
-          'getAnchorData.virtualAccount.data.attributes.accountNumber',
+          'sudoData.virtualAccount.data.attributes.accountNumber',
           isEqualTo: accNum,
         )
         .where(
-          'getAnchorData.virtualAccount.data.attributes.bank.id',
+          'sudoData.virtualAccount.data.attributes.bank.id',
           isEqualTo: bankId,
         )
         .limit(1)
@@ -375,7 +373,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
         isValid = info != null;
         if (info != null) {
           final data = info['data'];
-          final vaData = data['getAnchorData']?['virtualAccount']?['data'];
+          final vaData = data['sudoData']?['virtualAccount']?['data'];
           final attributes =
               vaData?['attributes'] as Map<String, dynamic>? ?? {};
           resolvedAccountName =
@@ -420,7 +418,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
       final String kycStatus = data['kycStatus'] ?? '';
       if (kycStatus == 'APPROVED') {
         final Map<String, dynamic>? virtualAccData =
-            data['getAnchorData']?['virtualAccount']?['data']
+            data['sudoData']?['virtualAccount']?['data']
                 as Map<String, dynamic>?;
         if (virtualAccData != null && virtualAccData['id'] != null) {
           final attributes =
@@ -452,7 +450,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
     if (userSnap.exists && userSnap.data() != null) {
       final data = userSnap.data()!;
       final Map<String, dynamic>? virtualAccData =
-          data['getAnchorData']?['virtualAccount']?['data']
+          data['sudoData']?['virtualAccount']?['data']
               as Map<String, dynamic>?;
       if (virtualAccData != null && virtualAccData['id'] != null) {
         final attributes =
@@ -558,7 +556,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
     }
     final recipientData = recipientInfo!['data'];
     final recipientVaData =
-        recipientData['getAnchorData']?['virtualAccount']?['data'];
+        recipientData['sudoData']?['virtualAccount']?['data'];
     final recipientAttributes =
         recipientVaData?['attributes'] as Map<String, dynamic>? ?? {};
     final recipientAccountName =
@@ -1258,7 +1256,7 @@ class _WithdrawalApprovalPageState extends State<WithdrawalApprovalPage> {
       final String kycStatus = data['kycStatus'] ?? '';
 
       if (kycStatus == 'APPROVED') {
-        final Map<String, dynamic>? virtualAccData = data['getAnchorData']?['virtualAccount']?['data'] as Map<String, dynamic>?;
+        final Map<String, dynamic>? virtualAccData = data['sudoData']?['virtualAccount']?['data'] as Map<String, dynamic>?;
 
         if (virtualAccData != null && virtualAccData['id'] != null) {
           final bankMap = virtualAccData['attributes']?['bank'] as Map<String, dynamic>?;
@@ -1280,7 +1278,7 @@ class _WithdrawalApprovalPageState extends State<WithdrawalApprovalPage> {
     if (userSnap.exists && userSnap.data() != null) {
       final data = userSnap.data()!;
       final Map<String, dynamic>? virtualAccData =
-          data['getAnchorData']?['virtualAccount']?['data'] as Map<String, dynamic>?;
+          data['sudoData']?['virtualAccount']?['data'] as Map<String, dynamic>?;
 
       if (virtualAccData != null && virtualAccData['id'] != null) {
         final bankMap = virtualAccData['attributes']?['bank'] as Map<String, dynamic>?;
@@ -1348,9 +1346,7 @@ class _WithdrawalApprovalPageState extends State<WithdrawalApprovalPage> {
         return;
       }
 
-      final result = await FirebaseFunctions.instance
-          .httpsCallable('createCounterparty')
-          .call({
+      final result = await callCloudFunctionLogged('sudoCreateCounterparty', source: 'business_app', payload: {
         'accountId': accountId,
         'bankId': recipientBankCode,
         'accountType': accountType,
@@ -1380,7 +1376,7 @@ class _WithdrawalApprovalPageState extends State<WithdrawalApprovalPage> {
     }
     setState(() => isLoading = false);
   }
-  Future<void> _createNipTransfer() async {
+  Future<void> _sudoTransferNip() async {
     if (counterpartyId == null || amount == null) {
       showToast('Counterparty or amount missing', Colors.red);
       return;
@@ -1405,9 +1401,7 @@ class _WithdrawalApprovalPageState extends State<WithdrawalApprovalPage> {
         return;
       }
 
-      final result = await FirebaseFunctions.instance
-          .httpsCallable('createNipTransfer')
-          .call({
+      final result = await callCloudFunctionLogged('sudoTransferNip', source: 'business_app', payload: {
         'accountType': accountType,
         'accountId': accountId,
         'counterpartyId': counterpartyId,
@@ -1482,7 +1476,7 @@ class _WithdrawalApprovalPageState extends State<WithdrawalApprovalPage> {
         });
       }
     } catch (e) {
-      debugPrint('createNipTransfer error: $e');
+      debugPrint('sudoTransferNip error: $e');
       showToast('Error processing transfer', Colors.red);
     }
     setState(() => isLoading = false);
@@ -1502,7 +1496,7 @@ class _WithdrawalApprovalPageState extends State<WithdrawalApprovalPage> {
         setState(() => isLoading = false);
         return;
       }
-      await _createNipTransfer();
+      await _sudoTransferNip();
     } catch (e) {
       showToast('Approval failed', Colors.red);
     } finally {

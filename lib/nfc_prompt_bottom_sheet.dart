@@ -453,7 +453,7 @@ class _TransferPageState extends State<TransferPage> {
     }
     String purpose = _purposeController.text;
 
-    // Perform real settlement: create (or reuse) counterparty and call createNipTransfer
+    // Perform real settlement: create (or reuse) counterparty and call sudoTransferNip
     try {
       final settled = await _settleNfcPayment(amount, purpose);
       if (!settled) {
@@ -493,8 +493,8 @@ class _TransferPageState extends State<TransferPage> {
       }
 
       // Sender's account details
-      final userDoc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
-      final accountId = userDoc.data()?['getAnchorData']?['virtualAccount']?['data']?['id'];
+      final accountDetails = await getCurrentAccountIdAndType();
+      final accountId = accountDetails['accountId']?.toString();
       if (accountId == null) {
         showToast('Account details not found', Colors.red);
         return false;
@@ -502,7 +502,7 @@ class _TransferPageState extends State<TransferPage> {
 
       // Recipient's VA details
       final recipientDoc = await FirebaseFirestore.instance.collection('users').doc(widget.endpointId).get();
-      final recipientVa = recipientDoc.data()?['getAnchorData']?['virtualAccount']?['data'];
+      final recipientVa = getVirtualAccountData(recipientDoc.data());
       if (recipientVa == null) {
         showToast('Recipient does not have a virtual account', Colors.red);
         return false;
@@ -519,18 +519,16 @@ class _TransferPageState extends State<TransferPage> {
       final recipientBankId = recipientVa['attributes']?['bank']?['id']?.toString();
 
       // Prevent sending to own account
-      final ownAccountNumber = userDoc.data()?['getAnchorData']?['virtualAccount']?['data']?['attributes']?['accountNumber']?.toString();
+      final ownAccountNumber = accountDetails['accountNumber']?.toString();
       if (ownAccountNumber != null && ownAccountNumber == recipientAccountNumber) {
         showToast('You cannot send money to your own account', Colors.red);
         return false;
       }
 
-      // Book transfer (both parties on Anchor — no counterparty needed)
+      // Book transfer (both parties on Sudo — no counterparty needed)
       final amountKobo = (amount * 100).toInt();
-      debugPrint('createBookTransfer: from=$accountId to=$toAccountId amount=$amountKobo');
-      final transferResult = await FirebaseFunctions.instance
-          .httpsCallable('createBookTransfer')
-          .call({
+      debugPrint('sudoTransferIntra: from=$accountId to=$toAccountId amount=$amountKobo');
+      final transferResult = await callCloudFunctionLogged('sudoTransferIntra', source: 'business_app', payload: {
         'fromAccountId': accountId,
         'toAccountId': toAccountId,
         'amount': amountKobo,

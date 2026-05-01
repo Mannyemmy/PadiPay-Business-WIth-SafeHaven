@@ -1,4 +1,4 @@
-﻿import 'dart:convert';
+import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
@@ -71,19 +71,35 @@ class _PayBillsPageState extends State<PayBillsPage> {
     _fetchUserAccount();
   }
 
+  Future<DocumentSnapshot<Map<String, dynamic>>> _fetchPreferredAccountDoc() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) throw Exception('User not authenticated');
+
+    final businessDoc = await FirebaseFirestore.instance
+        .collection('businesses')
+        .doc(user.uid)
+        .get();
+    if (businessDoc.exists && getWalletContainer(businessDoc.data()) != null) {
+      return businessDoc;
+    }
+
+    return FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .get();
+  }
+
   Future<void> _fetchUserAccount() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
 
-    final userDoc = await FirebaseFirestore.instance
-        .collection('users')
-        .doc(user.uid)
-        .get();
-    if (userDoc.exists) {
+    final accountDoc = await _fetchPreferredAccountDoc();
+    final data = accountDoc.data();
+    if (accountDoc.exists && data != null) {
       setState(() {
-        userAccount = userDoc.data()?['getAnchorData']?['virtualAccount'];
+        userAccount = getWalletContainer(data)?['virtualAccount'];
         cashbackBalance =
-            (userDoc.data()?['cashback']?['balance'] as num?)?.toDouble() ?? 0;
+            (data['cashback']?['balance'] as num?)?.toDouble() ?? 0;
       });
       _fetchBillers();
     }
@@ -245,23 +261,25 @@ class _PayBillsPageState extends State<PayBillsPage> {
         _fetchCategoryBillers('data', (list) {
           dataBillers = list;
           selectedDataNetwork = dataBillers.isNotEmpty
-              ? (dataBillers[0]['attributes']?['slug'] as String?) ??
-                    (dataBillers[0]['id'] as String)
+              ? (dataBillers[0]['id']?.toString() ??
+                    (dataBillers[0]['attributes']?['slug'] as String?) ??
+                    '')
               : null;
           isFetchingDataBillers = false;
           if (selectedDataNetwork != null) {
-            _fetchProducts(selectedDataNetwork!, 'data');
+            _fetchProducts(dataBillers[0]['id'] as String, 'data');
           }
         }),
         _fetchCategoryBillers('television', (list) {
           cableBillers = list;
           selectedCableOperator = cableBillers.isNotEmpty
-              ? (cableBillers[0]['attributes']?['slug'] as String?) ??
-                    (cableBillers[0]['id'] as String)
+              ? (cableBillers[0]['id']?.toString() ??
+                    (cableBillers[0]['attributes']?['slug'] as String?) ??
+                    '')
               : null;
           isFetchingCableBillers = false;
           if (selectedCableOperator != null) {
-            _fetchProducts(selectedCableOperator!, 'television');
+            _fetchProducts(cableBillers[0]['id'] as String, 'television');
           }
         }),
         _fetchCategoryBillers('electricity', (list) {
@@ -297,10 +315,11 @@ class _PayBillsPageState extends State<PayBillsPage> {
         billerList = List<Map<String, dynamic>>.from(data?['data'] ?? []);
       }
       if (billerList.isEmpty) {
-        final callable = FirebaseFunctions.instance.httpsCallable(
-          'listBillers',
+        final result = await callCloudFunctionLogged(
+          'sudoGetServiceCategories',
+          source: 'pay_bills.dart',
+          payload: {'category': category},
         );
-        final result = await callable.call({'category': category});
         final response = Map<String, dynamic>.from(result.data);
         print('$category Billers Response: $response');
         if (response['data'] is List) {
@@ -342,10 +361,11 @@ class _PayBillsPageState extends State<PayBillsPage> {
       }
       if (productList.isEmpty) {
         try {
-          final callable = FirebaseFunctions.instance.httpsCallable(
-            'getBillerProducts',
+          final result = await callCloudFunctionLogged(
+            'sudoGetCategoryProducts',
+            source: 'pay_bills.dart',
+            payload: {'billerId': billerId},
           );
-          final result = await callable.call({'billerId': billerId});
           final response = Map<String, dynamic>.from(result.data);
           print('Products Response for $category: $response');
           if (response['data'] is List) {
@@ -727,10 +747,10 @@ class _PayBillsPageState extends State<PayBillsPage> {
         formattedPhone = '234${formattedPhone.substring(1)}';
       }
 
-      final callable = FirebaseFunctions.instance.httpsCallable(
-        'initiateBillPayment',
-      );
-      final result = await callable.call({
+      final result = await callCloudFunctionLogged(
+        'sudoPurchaseVas',
+        source: 'pay_bills.dart',
+        payload: {
         'type': 'Data',
         'accountId': userAccount!['data']['id'],
         'accountType': userAccount!['data']['type'],
@@ -885,10 +905,10 @@ class _PayBillsPageState extends State<PayBillsPage> {
         cashbackUsed = selectedCashbackUsage;
       }
 
-      final callable = FirebaseFunctions.instance.httpsCallable(
-        'initiateBillPayment',
-      );
-      final result = await callable.call({
+      final result = await callCloudFunctionLogged(
+        'sudoPurchaseVas',
+        source: 'pay_bills.dart',
+        payload: {
         'type': 'Television',
         'accountId': userAccount!['data']['id'],
         'accountType': userAccount!['data']['type'],
@@ -1054,10 +1074,10 @@ class _PayBillsPageState extends State<PayBillsPage> {
         cashbackUsed = selectedCashbackUsage;
       }
 
-      final callable = FirebaseFunctions.instance.httpsCallable(
-        'initiateBillPayment',
-      );
-      final result = await callable.call({
+      final result = await callCloudFunctionLogged(
+        'sudoPurchaseVas',
+        source: 'pay_bills.dart',
+        payload: {
         'type': 'Electricity',
         'accountId': userAccount!['data']['id'],
         'accountType': userAccount!['data']['type'],
@@ -1200,8 +1220,9 @@ class _PayBillsPageState extends State<PayBillsPage> {
                     items: dataBillers,
                     selectedId: selectedDataNetwork,
                     idExtractor: (b) =>
-                        (b['attributes']?['slug'] as String?) ??
-                        (b['id'] as String),
+                      b['id']?.toString() ??
+                      (b['attributes']?['slug'] as String?) ??
+                      '',
                     nameExtractor: (b) =>
                         (b['attributes']?['name'] as String?) ?? 'Unknown',
                   );
@@ -1515,8 +1536,9 @@ class _PayBillsPageState extends State<PayBillsPage> {
                     items: cableBillers,
                     selectedId: selectedCableOperator,
                     idExtractor: (b) =>
-                        (b['attributes']?['slug'] as String?) ??
-                        (b['id'] as String),
+                      b['id']?.toString() ??
+                      (b['attributes']?['slug'] as String?) ??
+                      '',
                     nameExtractor: (b) =>
                         (b['attributes']?['name'] as String?) ?? 'Unknown',
                   );

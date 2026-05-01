@@ -884,9 +884,8 @@ class _UpgradeTierState extends State<UpgradeTier> {
         };
         await docRef.update(updateData);
 
-        // Create Getanchor User
+        // Create Sudo User
         final functions = FirebaseFunctions.instance;
-        HttpsCallable createUserFunc = functions.httpsCallable('createGetanchorUser');
         final payload = {
           'firstName': firstName,
           'lastName': lastName,
@@ -898,34 +897,66 @@ class _UpgradeTierState extends State<UpgradeTier> {
           'postalCode': postalCode,
           'phoneNumber': phoneNumber,
         };
-        print('Sending createGetanchorUser payload: $payload');
-        final createUserResult = await createUserFunc.call(payload);
-        print('Create Getanchor User Response: ${createUserResult.data}');
+        print('Sending sudoCreateUser payload: $payload');
+        final createUserResult = await callCloudFunctionLogged(
+          'sudoCreateUser',
+          source: 'kyc/upgrade_tier.dart',
+          functions: functions,
+          payload: payload,
+        );
+        print('Create Sudo User Response: ${createUserResult.data}');
         String customerId = createUserResult.data['data']['id'];
 
         // Save customer creation response
         await docRef.update({
-          'getAnchorData.customerCreation': createUserResult.data,
+          'sudoData.customerCreation': createUserResult.data,
         });
 
-        // Attempt KYC upgrade for Tier 2
-        HttpsCallable upgradeKycFunc = functions.httpsCallable('upgradeCustomerKyc');
-        final kycPayload = {
-          'customerId': customerId,
-          'level': 'TIER_2',
-          'bvn': _controller.text,
-          'dateOfBirth': formattedDateForApi,
-          'gender': gender,
-        };
-        print('Sending upgradeCustomerKyc payload: $kycPayload');
-        final upgradeKycResult = await upgradeKycFunc.call(kycPayload);
-        print('Upgrade Customer KYC Response: ${upgradeKycResult.data}');
-        await docRef.update({
-          'getAnchorData.upgradeKyc': upgradeKycResult.data,
-        });
+        // Identity verification (BVN OTP) required before creating subaccount
+        try {
+          final initiateResult = await callCloudFunctionLogged(
+            'sudoInitiateIdentityVerification',
+            source: 'kyc/upgrade_tier.dart',
+            functions: functions,
+            payload: {'type': 'BVN', 'number': _controller.text},
+          );
+          final String? identityId =
+              initiateResult.data?['data']?['identityId']?.toString();
+          print('sudoInitiateIdentityVerification identityId: $identityId');
+
+          setState(() => _isLoading = false);
+          final String? otp = await _showIdentityOtpBottomSheet();
+          if (otp == null || otp.isEmpty) {
+            showToast('Identity verification cancelled', Colors.red);
+            setState(() => _isLoading = false);
+            return;
+          }
+          setState(() => _isLoading = true);
+
+          await callCloudFunctionLogged(
+            'sudoValidateIdentityVerification',
+            source: 'kyc/upgrade_tier.dart',
+            functions: functions,
+            payload: {
+              'identityId': identityId ?? '',
+              'type': 'BVN',
+              'otp': otp,
+            },
+          );
+          print('sudoValidateIdentityVerification completed');
+        } on FirebaseFunctionsException catch (e) {
+          print('Identity verification error: ${e.message}');
+          showToast(e.message ?? 'Identity verification failed', Colors.red);
+          setState(() => _isLoading = false);
+          return;
+        } catch (e) {
+          print('Identity verification error: $e');
+          showToast('Identity verification failed', Colors.red);
+          setState(() => _isLoading = false);
+          return;
+        }
 
         // Create Electronic Account
-        HttpsCallable createAccountFunc = functions.httpsCallable('createElectronicAccount');
         final idempotencyKey = Uuid().v4();
         final accountPayload = {
           'customerId': customerId,
@@ -933,11 +964,16 @@ class _UpgradeTierState extends State<UpgradeTier> {
           'type':"IndividualCustomer",
           'idempotencyKey': idempotencyKey,
         };
-        print('Sending createElectronicAccount payload: $accountPayload');
-        final createAccountResult = await createAccountFunc.call(accountPayload);
+        print('Sending sudoCreateSubAccount payload: $accountPayload');
+        final createAccountResult = await callCloudFunctionLogged(
+          'sudoCreateSubAccount',
+          source: 'kyc/upgrade_tier.dart',
+          functions: functions,
+          payload: accountPayload,
+        );
         print('Create Electronic Account Response: ${createAccountResult.data}');
         await docRef.update({
-          'getAnchorData.virtualAccount': createAccountResult.data,
+          'sudoData.virtualAccount': createAccountResult.data,
         });
 
         // Send virtual account creation email
@@ -985,11 +1021,11 @@ class _UpgradeTierState extends State<UpgradeTier> {
         }
 
         // Save tier
-        await docRef.update({'getAnchorData.tier': widget.tier});
+        await docRef.update({'sudoData.tier': widget.tier});
       } else {
         // Tier 3: Only call upgradeCustomerKyc and update Firestore
         // Get customerId
-        String? customerId = userData['getAnchorData']?['customerCreation']?['data']?['id'];
+        String? customerId = userData['sudoData']?['customerCreation']?['data']?['id'];
         if (customerId == null) {
           print('Error: customerId not found in Firestore');
           showToast('Customer ID not found. Please complete Tier 2 first.', Colors.red);
@@ -1007,25 +1043,8 @@ class _UpgradeTierState extends State<UpgradeTier> {
         };
         await docRef.update(updateData);
 
-        // Call upgradeCustomerKyc for Tier 3
-        final functions = FirebaseFunctions.instance;
-        HttpsCallable upgradeKycFunc = functions.httpsCallable('upgradeCustomerKyc');
-        final kycPayload = {
-          'customerId': customerId,
-          'level': 'TIER_3',
-          'idType': selectedIdType,
-          'idNumber': _idNumberController.text,
-          'expiryDate': _formatDateForApi(_expiryController.text),
-        };
-        print('Sending upgradeCustomerKyc payload: $kycPayload');
-        final upgradeKycResult = await upgradeKycFunc.call(kycPayload);
-        print('Upgrade Customer KYC Response: ${upgradeKycResult.data}');
-
-        // Update Firestore with KYC response and tier
-        await docRef.update({
-          'getAnchorData.upgradeKyc': upgradeKycResult.data,
-          'getAnchorData.tier': widget.tier,
-        });
+        // Save tier
+        await docRef.update({'sudoData.tier': widget.tier});
       }
 
       print('✅ Account upgraded successfully');
@@ -1039,6 +1058,127 @@ class _UpgradeTierState extends State<UpgradeTier> {
         _isLoading = false;
       });
     }
+  }
+
+  /// Shows an OTP input bottom sheet for identity verification.
+  Future<String?> _showIdentityOtpBottomSheet() async {
+    final otpController = TextEditingController();
+    String? errorText;
+
+    final result = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: StatefulBuilder(
+            builder: (ctx, setModalState) {
+              return SingleChildScrollView(
+                padding: EdgeInsets.only(
+                  left: 16,
+                  right: 16,
+                  top: 20,
+                  bottom: MediaQuery.of(ctx).viewInsets.bottom + 16,
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 40,
+                        height: 4,
+                        margin: const EdgeInsets.only(bottom: 16),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade300,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                    const Text(
+                      'Verify Your Identity',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'An OTP has been sent to your registered phone number. Enter it below to verify your BVN.',
+                      style: TextStyle(color: Colors.grey.shade600, fontSize: 14),
+                    ),
+                    const SizedBox(height: 20),
+                    TextFormField(
+                      controller: otpController,
+                      keyboardType: TextInputType.number,
+                      maxLength: 6,
+                      autofocus: true,
+                      decoration: InputDecoration(
+                        labelText: 'Enter OTP',
+                        hintText: '6-digit OTP',
+                        counterText: '',
+                        errorText: errorText,
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide(color: Colors.grey.shade300),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide(color: Colors.grey.shade300),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide(color: primaryColor, width: 2),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: primaryColor,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                        onPressed: () {
+                          final otp = otpController.text.trim();
+                          if (otp.length < 4) {
+                            setModalState(() {
+                              errorText = 'Please enter a valid OTP';
+                            });
+                            return;
+                          }
+                          Navigator.pop(ctx, otp);
+                        },
+                        child: const Text(
+                          'Verify',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 16,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+    otpController.dispose();
+    return result;
   }
 
   @override

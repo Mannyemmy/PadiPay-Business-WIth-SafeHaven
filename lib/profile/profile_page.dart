@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/svg.dart';
 import 'package:flutter_switch/flutter_switch.dart';
 import 'package:padi_pay_business/cards_page.dart';
-import 'package:padi_pay_business/padi_book/padi_book_page.dart';
 import 'package:padi_pay_business/home_pages/home_page.dart';
 import 'package:padi_pay_business/kyc/user_upgrade_manager.dart';
 import 'package:padi_pay_business/legal_and_regulatory.dart';
@@ -16,6 +15,7 @@ import 'package:padi_pay_business/promos.dart';
 import 'package:padi_pay_business/referrals.dart';
 import 'package:padi_pay_business/sign_in.dart';
 import 'package:padi_pay_business/super_agent/super_agent_hub.dart';
+import 'package:padi_pay_business/padi_book/padi_book_page.dart';
 import 'package:padi_pay_business/transactions_history.dart';
 import 'package:padi_pay_business/ui/bottom_nav_bar.dart';
 import 'package:padi_pay_business/utils.dart';
@@ -78,7 +78,7 @@ class _ProfilePageState extends State<ProfilePage> {
         state = data['address']?['state'];
         country = data['address']?['country'];
         profilePhotoUrl = data['profilePhotoUrl'];
-        tier = (data['getAnchorData']?['tier'] ?? "0").toString();
+        tier = (getWalletTier(data) ?? "0").toString();
       });
     }
 
@@ -96,7 +96,7 @@ class _ProfilePageState extends State<ProfilePage> {
             final parentUserSnap = await FirebaseFirestore.instance.collection('users').doc(parentBusinessId).get();
             if (parentUserSnap.exists) {
               final pdata = parentUserSnap.data() as Map<String, dynamic>;
-              parentTier = pdata['getAnchorData']?['tier']?.toString();
+              parentTier = getWalletTier(pdata);
             }
           } catch (e) {
             debugPrint('Error fetching parent user in profile: $e');

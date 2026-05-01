@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
+import 'package:padi_pay_business/utils.dart';
 import 'package:uuid/uuid.dart';
 
 class CashbackService {
@@ -52,7 +53,7 @@ class CashbackService {
       throw Exception('Company cashback reserve account not configured');
     }
 
-    final result = await _functions.httpsCallable('createBookTransfer').call({
+    final result = await callCloudFunctionLogged('sudoTransferIntra', source: 'business_app', functions: _functions, payload: {
       'fromAccountId': companyAccountId,
       'toAccountId': toAccountId,
       'amount': _toKobo(amountNaira),
@@ -83,7 +84,7 @@ class CashbackService {
       throw Exception('Company cashback reserve account not configured');
     }
 
-    final result = await _functions.httpsCallable('createBookTransfer').call({
+    final result = await callCloudFunctionLogged('sudoTransferIntra', source: 'business_app', functions: _functions, payload: {
       'fromAccountId': fromAccountId,
       'toAccountId': companyAccountId,
       'amount': _toKobo(amountNaira),

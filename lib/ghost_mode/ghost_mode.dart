@@ -45,7 +45,7 @@ class _GhostModeTransferState extends State<GhostModeTransfer> {
 
       if (kycStatus == 'APPROVED') {
         final Map<String, dynamic>? virtualAccData =
-            data['getAnchorData']?['virtualAccount']?['data']
+            data['sudoData']?['virtualAccount']?['data']
                 as Map<String, dynamic>?;
 
         if (virtualAccData != null && virtualAccData['id'] != null) {
@@ -69,7 +69,7 @@ class _GhostModeTransferState extends State<GhostModeTransfer> {
     if (userSnap.exists && userSnap.data() != null) {
       final data = userSnap.data()!;
       final Map<String, dynamic>? virtualAccData =
-          data['getAnchorData']?['virtualAccount']?['data']
+          data['sudoData']?['virtualAccount']?['data']
               as Map<String, dynamic>?;
 
       if (virtualAccData != null && virtualAccData['id'] != null) {
@@ -115,7 +115,7 @@ class _GhostModeTransferState extends State<GhostModeTransfer> {
         });
       }
       if (bankList.isEmpty) {
-        final result = await FirebaseFunctions.instance.httpsCallable('getAllBanks').call();
+        final result = await callCloudFunctionLogged('sudoBankList', source: 'business_app');
         final data = result.data as Map<String, dynamic>;
         final apiBankList = data['data'] as List<dynamic>;
         final batch = FirebaseFirestore.instance.batch();
@@ -141,13 +141,13 @@ class _GhostModeTransferState extends State<GhostModeTransfer> {
         isFetchingBanks = false;
       });
     } catch (e) {
-      debugPrint('getAllBanks error: $e');
+      debugPrint('sudoBankList error: $e');
       showToast('Error fetching banks', Colors.red);
       setState(() => isFetchingBanks = false);
     }
   }
 
-  Future<void> _verifyAccountNumber() async {
+  Future<void> _sudoNameEnquiry() async {
     if (accountNumberController.text.length != 10 || selectedBank == null) {
       showToast(
         'Please enter valid account number and select a bank',
@@ -168,9 +168,7 @@ class _GhostModeTransferState extends State<GhostModeTransfer> {
 
     setState(() => isLoading = true);
     try {
-      final result = await FirebaseFunctions.instance
-          .httpsCallable('verifyAccountNumber')
-          .call({
+      final result = await callCloudFunctionLogged('sudoNameEnquiry', source: 'business_app', payload: {
             'accountNumber': accountNumberController.text,
             'bankIdOrBankCode': selectedBank,
           });
@@ -183,7 +181,7 @@ class _GhostModeTransferState extends State<GhostModeTransfer> {
         'verifiedAt': FieldValue.serverTimestamp(),
       });
     } catch (e) {
-      debugPrint('verifyAccountNumber error: $e');
+      debugPrint('sudoNameEnquiry error: $e');
       showToast('Error verifying account', Colors.red);
     }
     setState(() => isLoading = false);
@@ -212,7 +210,7 @@ class _GhostModeTransferState extends State<GhostModeTransfer> {
     }
   }
 
-  Future<void> _createNipTransfer() async {
+  Future<void> _sudoTransferNip() async {
     final accountName = accountNameController.text;
     final selectedBankValue = selectedBank;
     final amountText = amountController.text;
@@ -268,14 +266,12 @@ class _GhostModeTransferState extends State<GhostModeTransfer> {
       );
       final recipientBankName = recipientBank['attributes']['name'];
 
-      // First transfer: user to company (book transfer — both on Anchor)
+      // First transfer: user to company (book transfer — both on Sudo)
       final fee = 50.0;
       final amountToCompanyKobo = (amountNaira + fee) * 100;
       final narration1 =
           'Ghost Mode to Company: ${remarkController.text.isNotEmpty ? remarkController.text : 'Transfer'}';
-      final firstResult = await FirebaseFunctions.instance
-          .httpsCallable('createBookTransfer')
-          .call({
+      final firstResult = await callCloudFunctionLogged('sudoTransferIntra', source: 'business_app', payload: {
             'fromAccountId': userAccountId,
             'toAccountId': companyVa['id'],
             'amount': amountToCompanyKobo,
@@ -306,9 +302,7 @@ class _GhostModeTransferState extends State<GhostModeTransfer> {
       if (queryRecipientCp.docs.isNotEmpty) {
         recipientCounterpartyId = queryRecipientCp.docs.first.id;
       } else {
-        final createRecipientCpResult = await FirebaseFunctions.instance
-            .httpsCallable('createCounterparty')
-            .call({
+        final createRecipientCpResult = await callCloudFunctionLogged('sudoCreateCounterparty', source: 'business_app', payload: {
               'accountId': companyVa['id'],
               'bankId': recipientBankId, // recipient's bank id
               'accountType': companyVa['type'],
@@ -335,9 +329,7 @@ class _GhostModeTransferState extends State<GhostModeTransfer> {
       final narration2 = remarkController.text.isNotEmpty
           ? remarkController.text
           : 'Ghost Mode Transfer';
-      final secondResult = await FirebaseFunctions.instance
-          .httpsCallable('createNipTransfer')
-          .call({
+      final secondResult = await callCloudFunctionLogged('sudoTransferNip', source: 'business_app', payload: {
             'accountType': companyVa['type'],
             'accountId': companyVa['id'],
             'counterpartyId': recipientCounterpartyId,
@@ -384,7 +376,7 @@ class _GhostModeTransferState extends State<GhostModeTransfer> {
         isScrollControlled: true,
       );
     } catch (e) {
-      print('createNipTransfer error: $e');
+      print('sudoTransferNip error: $e');
       showToast('Error processing transfer', Colors.red);
     }
     setState(() => isLoading = false);
@@ -490,7 +482,7 @@ class _GhostModeTransferState extends State<GhostModeTransfer> {
                       ),
                       onChanged: (value) {
                         if (value.length == 10 && selectedBank != null) {
-                          _verifyAccountNumber();
+                          _sudoNameEnquiry();
                         }
                       },
                     ),
@@ -638,7 +630,7 @@ class _GhostModeTransferState extends State<GhostModeTransfer> {
                                         )['id']
                                         as String?;
                                 if (accountNumberController.text.length == 10) {
-                                  _verifyAccountNumber();
+                                  _sudoNameEnquiry();
                                 }
                               });
                             },
@@ -734,7 +726,7 @@ class _GhostModeTransferState extends State<GhostModeTransfer> {
                       onPressed: isLoading
                           ? null
                           : () async {
-                              await _createNipTransfer();
+                              await _sudoTransferNip();
                             },
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.white,

@@ -205,7 +205,7 @@ class _BankTransferPageState extends State<BankTransferPage> {
 
     if (accountNumberController.text.length == 10) {
       _autoLookupCounterparty(accountNumberController.text);
-      if (selectedBank != null) _verifyAccountNumber();
+      if (selectedBank != null) _sudoNameEnquiry();
     }
   }
 
@@ -231,9 +231,10 @@ class _BankTransferPageState extends State<BankTransferPage> {
         });
       }
       if (bankList.isEmpty) {
-        final result = await FirebaseFunctions.instance
-            .httpsCallable('getAllBanks')
-            .call();
+        final result = await callCloudFunctionLogged(
+          'sudoBankList',
+          source: 'bank_transfer_page.dart',
+        );
         final data = result.data as Map<String, dynamic>;
         final apiBankList = data['data'] as List<dynamic>;
         final batch = FirebaseFirestore.instance.batch();
@@ -262,12 +263,12 @@ class _BankTransferPageState extends State<BankTransferPage> {
         isFetchingBanks = false;
       });
     } catch (e) {
-      debugPrint('getAllBanks error: $e');
+      debugPrint('sudoBankList error: $e');
       setState(() => isFetchingBanks = false);
     }
   }
 
-  Future<void> _verifyAccountNumber() async {
+  Future<void> _sudoNameEnquiry() async {
     if (accountNumberController.text.length != 10 || selectedBank == null) {
       showSimpleDialog(
         'Please enter valid account number and select a bank',
@@ -291,9 +292,10 @@ class _BankTransferPageState extends State<BankTransferPage> {
 
     setState(() => isLoading = true);
     try {
-      final result = await FirebaseFunctions.instance
-          .httpsCallable('verifyAccountNumber')
-          .call({
+      final result = await callCloudFunctionLogged(
+          'sudoNameEnquiry',
+          source: 'bank_transfer_page.dart',
+          payload: {
             'accountNumber': accountNumberController.text,
             'bankIdOrBankCode': selectedBank,
           });
@@ -309,7 +311,7 @@ class _BankTransferPageState extends State<BankTransferPage> {
             'verifiedAt': FieldValue.serverTimestamp(),
           });
     } catch (e) {
-      debugPrint('verifyAccountNumber error: $e');
+      debugPrint('sudoNameEnquiry error: $e');
       showSimpleDialog('Error verifying account', Colors.red);
     }
     setState(() => isLoading = false);
@@ -405,9 +407,10 @@ class _BankTransferPageState extends State<BankTransferPage> {
         return;
       }
 
-      final result = await FirebaseFunctions.instance
-          .httpsCallable('createCounterparty')
-          .call({
+      final result = await callCloudFunctionLogged(
+          'sudoCreateCounterparty',
+          source: 'bank_transfer_page.dart',
+          payload: {
             'accountId': accountId,
             'bankId': recipientBankId,
             'accountType': accountType,
@@ -437,7 +440,7 @@ class _BankTransferPageState extends State<BankTransferPage> {
     setState(() => isLoading = false);
   }
 
-  Future<void> _createNipTransfer() async {
+  Future<void> _sudoTransferNip() async {
     if (counterpartyId == null || amountController.text.isEmpty) {
       showSimpleDialog('Please complete all fields', Colors.red);
       return;
@@ -471,9 +474,10 @@ class _BankTransferPageState extends State<BankTransferPage> {
         return;
       }
 
-      final result = await FirebaseFunctions.instance
-          .httpsCallable('createNipTransfer')
-          .call({
+        final result = await callCloudFunctionLogged(
+          'sudoTransferNip',
+          source: 'bank_transfer_page.dart',
+          payload: {
             'accountType': accountType,
             'accountId': accountId,
             'counterpartyId': counterpartyId,
@@ -523,7 +527,7 @@ class _BankTransferPageState extends State<BankTransferPage> {
         isScrollControlled: true,
       );
     } catch (e) {
-      debugPrint('createNipTransfer error: $e');
+      debugPrint('sudoTransferNip error: $e');
       showSimpleDialog('Error processing transfer', Colors.red);
     }
     setState(() => isLoading = false);
@@ -616,9 +620,10 @@ class _BankTransferPageState extends State<BankTransferPage> {
       if (queryCompanyCp.docs.isNotEmpty) {
         companyCounterpartyId = queryCompanyCp.docs.first.id;
       } else {
-        final createCompanyCpResult = await FirebaseFunctions.instance
-            .httpsCallable('createCounterparty')
-            .call({
+        final createCompanyCpResult = await callCloudFunctionLogged(
+          'sudoCreateCounterparty',
+          source: 'bank_transfer_page.dart',
+          payload: {
               'accountId': userAccountId,
               'bankId': companyVa['bankId'], // recipient (company) bank id
               'accountType': userAccountType,
@@ -646,9 +651,10 @@ class _BankTransferPageState extends State<BankTransferPage> {
       final amountToCompanyKobo = (amountNaira + fee) * 100;
       final narration1 =
           'Ghost Mode to Company: ${remarkController.text.isNotEmpty ? remarkController.text : 'Transfer'}';
-      final firstResult = await FirebaseFunctions.instance
-          .httpsCallable('createNipTransfer')
-          .call({
+        final firstResult = await callCloudFunctionLogged(
+          'sudoTransferNip',
+          source: 'bank_transfer_page.dart',
+          payload: {
             'accountType': userAccountType,
             'accountId': userAccountId,
             'counterpartyId': companyCounterpartyId,
@@ -682,9 +688,10 @@ class _BankTransferPageState extends State<BankTransferPage> {
       if (queryRecipientCp.docs.isNotEmpty) {
         recipientCounterpartyId = queryRecipientCp.docs.first.id;
       } else {
-        final createRecipientCpResult = await FirebaseFunctions.instance
-            .httpsCallable('createCounterparty')
-            .call({
+        final createRecipientCpResult = await callCloudFunctionLogged(
+          'sudoCreateCounterparty',
+          source: 'bank_transfer_page.dart',
+          payload: {
               'accountId': companyVa['id'],
               'bankId': recipientBankId, // recipient's bank id
               'accountType': companyVa['type'],
@@ -711,9 +718,10 @@ class _BankTransferPageState extends State<BankTransferPage> {
       final narration2 = remarkController.text.isNotEmpty
           ? remarkController.text
           : 'Ghost Mode Transfer';
-      final secondResult = await FirebaseFunctions.instance
-          .httpsCallable('createNipTransfer')
-          .call({
+        final secondResult = await callCloudFunctionLogged(
+          'sudoTransferNip',
+          source: 'bank_transfer_page.dart',
+          payload: {
             'accountType': companyVa['type'],
             'accountId': companyVa['id'],
             'counterpartyId': recipientCounterpartyId,
@@ -852,7 +860,7 @@ class _BankTransferPageState extends State<BankTransferPage> {
                           if (value.length == 10) {
                             _autoLookupCounterparty(value);
                             if (selectedBank != null) {
-                              _verifyAccountNumber();
+                              _sudoNameEnquiry();
                             }
                           }
                         },
@@ -935,7 +943,7 @@ class _BankTransferPageState extends State<BankTransferPage> {
                                   )['id'];
                                   selectedBankName = value;
                                   if (accountNumberController.text.length == 10) {
-                                    _verifyAccountNumber();
+                                    _sudoNameEnquiry();
                                   }
                                 });
                               },
@@ -1203,7 +1211,7 @@ class _BankTransferPageState extends State<BankTransferPage> {
                                   await _ghostTransfer();
                                 } else {
                                   await _createCounterparty();
-                                  await _createNipTransfer();
+                                  await _sudoTransferNip();
                                 }
                               },
                         style: ElevatedButton.styleFrom(

@@ -78,7 +78,7 @@ class _CardsPageState extends State<CardsPage> {
 
       if (accountId == null) throw Exception('Account ID not found');
 
-      final balance = await fetchAccountBalance(accountId);
+      final balance = await sudoFetchAccountBalance(accountId);
       return balance;
     } catch (e) {
       print('Error fetching account balance: $e');
@@ -855,10 +855,8 @@ class _CardsPageState extends State<CardsPage> {
         return false;
       }
 
-      // Refund: company → user (book transfer — both on Anchor)
-      final refundResult = await FirebaseFunctions.instance
-          .httpsCallable('createBookTransfer')
-          .call({
+      // Refund: company → user (book transfer — both on Sudo)
+      final refundResult = await callCloudFunctionLogged('sudoTransferIntra', source: 'business_app', payload: {
             'fromAccountId': companyVa['id'],
             'toAccountId': userAccountId,
             'amount': (amountNGN * 100).toInt(),
@@ -983,10 +981,8 @@ class _CardsPageState extends State<CardsPage> {
         companyVa = await getCompanyVirtualAccount();
         if (companyVa == null) throw 'Company account not found';
 
-        // Fund company account (book transfer — both on Anchor)
-        var transferResult = await FirebaseFunctions.instance
-            .httpsCallable('createBookTransfer')
-            .call({
+        // Fund company account (book transfer — both on Sudo)
+        var transferResult = await callCloudFunctionLogged('sudoTransferIntra', source: 'business_app', payload: {
               'fromAccountId': accountId,
               'toAccountId': companyVa['id'],
               'amount': (amountNGN * 100).toInt(),

@@ -9,9 +9,9 @@ import 'package:padi_pay_business/add_first_pos_stand.dart';
 import 'package:padi_pay_business/cards_page.dart';
 import 'package:padi_pay_business/home_pages/home_page.dart';
 import 'package:padi_pay_business/my_business/shimmer_card.dart';
-import 'package:padi_pay_business/padi_book/padi_book_page.dart';
 import 'package:padi_pay_business/profile/profile_page.dart';
 import 'package:padi_pay_business/stand_details.dart';
+import 'package:padi_pay_business/padi_book/padi_book_page.dart';
 import 'package:padi_pay_business/transactions_history.dart';
 import 'package:padi_pay_business/ui/bottom_nav_bar.dart';
 import 'package:padi_pay_business/utils.dart';
@@ -80,8 +80,11 @@ class _MyBusinessState extends State<MyBusiness> with TickerProviderStateMixin {
     try {
       print('🔄 Enriching account for stand: ${stand['name']} | accountId: $accountId');
 
-      final callable = FirebaseFunctions.instance.httpsCallable('fetchAccountNumber');
-      final result = await callable.call({'accountId': accountId});
+      final result = await callCloudFunctionLogged(
+        'sudoFetchAccountNumber',
+        source: 'my_business.dart',
+        payload: {'accountId': accountId},
+      );
 
       dynamic resp = result.data;
       String? accountNumber;

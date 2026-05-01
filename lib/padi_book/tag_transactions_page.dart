@@ -191,11 +191,11 @@ class _TagTransactionsPageState extends State<TagTransactionsPage> {
                 .where((id) => id.isNotEmpty)
                 .toList();
             userAccountId =
-                data['getAnchorData']?['virtualAccount']?['data']?['id'];
+                data['sudoData']?['virtualAccount']?['data']?['id'];
             debugPrint('[TagTxns] isBusinessOwner=true, posStandAccountIds=$posStandAccountIds, userAccountId=$userAccountId');
           } else {
             userAccountId =
-                data['getAnchorData']?['virtualAccount']?['data']?['id'];
+                data['sudoData']?['virtualAccount']?['data']?['id'];
             debugPrint('[TagTxns] regular biz user, userAccountId=$userAccountId');
           }
         } else {

@@ -235,13 +235,13 @@ class _TagTransferPageState extends State<TagTransferPage> {
       }
 
       final recipientAccountNumber =
-          recipientData!['getAnchorData']?['virtualAccount']?['data']?['attributes']?['accountNumber'];
+          recipientData!['sudoData']?['virtualAccount']?['data']?['attributes']?['accountNumber'];
       String? recipientBankId =
-          recipientData!['getAnchorData']?['virtualAccount']?['data']?['attributes']?['bank']?['id'];
+          recipientData!['sudoData']?['virtualAccount']?['data']?['attributes']?['bank']?['id'];
       final recipientBankName =
-          recipientData!['getAnchorData']?['virtualAccount']?['data']?['attributes']?['bank']?['name'];
+          recipientData!['sudoData']?['virtualAccount']?['data']?['attributes']?['bank']?['name'];
       final recipientAccountName =
-          recipientData!['getAnchorData']?['virtualAccount']?['data']?['attributes']?['accountName'];
+          recipientData!['sudoData']?['virtualAccount']?['data']?['attributes']?['accountName'];
 
       // Try to resolve bank id from name if missing
       if ((recipientBankId == null || recipientBankId.isEmpty) && recipientBankName != null && recipientBankName.isNotEmpty) {
@@ -277,9 +277,7 @@ class _TagTransferPageState extends State<TagTransferPage> {
         return;
       }
 
-      final result = await FirebaseFunctions.instance
-          .httpsCallable('createCounterparty')
-          .call({
+      final result = await callCloudFunctionLogged('sudoCreateCounterparty', source: 'business_app', payload: {
         'accountId': accountId,
         'bankId': recipientBankId,
         'accountType': accountType,
@@ -310,7 +308,7 @@ class _TagTransferPageState extends State<TagTransferPage> {
     setState(() => isLoading = false);
   }
 
-  Future<void> _createNipTransfer() async {
+  Future<void> _sudoTransferNip() async {
     if (recipientData == null || amountController.text.isEmpty) {
       return;
     }
@@ -337,17 +335,15 @@ class _TagTransferPageState extends State<TagTransferPage> {
         return;
       }
 
-      // Recipient's Anchor account ID (internal book transfer)
-      final toAccountId = recipientData!['getAnchorData']?['virtualAccount']?['data']?['id']?.toString();
+      // Recipient's Sudo account ID (internal book transfer)
+      final toAccountId = recipientData!['sudoData']?['virtualAccount']?['data']?['id']?.toString();
       if (toAccountId == null || toAccountId.isEmpty) {
         showSimpleDialog('Recipient account not found', Colors.red);
         setState(() => isLoading = false);
         return;
       }
 
-      final result = await FirebaseFunctions.instance
-          .httpsCallable('createBookTransfer')
-          .call({
+      final result = await callCloudFunctionLogged('sudoTransferIntra', source: 'business_app', payload: {
         'fromAccountId': accountId,
         'toAccountId': toAccountId,
         'amount': double.parse(amountController.text) * 100,
@@ -365,13 +361,13 @@ class _TagTransferPageState extends State<TagTransferPage> {
       }
 
       final recipientAccountNumber =
-          recipientData!['getAnchorData']?['virtualAccount']?['data']?['attributes']?['accountNumber'];
+          recipientData!['sudoData']?['virtualAccount']?['data']?['attributes']?['accountNumber'];
       final recipientBankName =
-          recipientData!['getAnchorData']?['virtualAccount']?['data']?['attributes']?['bank']?['name'];
+          recipientData!['sudoData']?['virtualAccount']?['data']?['attributes']?['bank']?['name'];
       final recipientBankId =
-          recipientData!['getAnchorData']?['virtualAccount']?['data']?['attributes']?['bank']?['id'];
+          recipientData!['sudoData']?['virtualAccount']?['data']?['attributes']?['bank']?['id'];
       final recipientAccountName =
-          recipientData!['getAnchorData']?['virtualAccount']?['data']?['attributes']?['accountName'];
+          recipientData!['sudoData']?['virtualAccount']?['data']?['attributes']?['accountName'];
 
       await FirebaseFirestore.instance.collection('transactions').add({
         'userId': user.uid,
@@ -406,7 +402,7 @@ class _TagTransferPageState extends State<TagTransferPage> {
         isScrollControlled: true,
       );
     } catch (e) {
-      debugPrint('createNipTransfer error: $e');
+      debugPrint('sudoTransferNip error: $e');
       if(e.toString().contains("There was an error processing the request")){
         showSimpleDialog("Network Downtime", Colors.red);
         return;
@@ -460,13 +456,13 @@ class _TagTransferPageState extends State<TagTransferPage> {
       }
 
       final recipientAccountNumber =
-          recipientData!['getAnchorData']?['virtualAccount']?['data']?['attributes']?['accountNumber'];
+          recipientData!['sudoData']?['virtualAccount']?['data']?['attributes']?['accountNumber'];
       final recipientBankId =
-          recipientData!['getAnchorData']?['virtualAccount']?['data']?['attributes']?['bank']?['id'];
+          recipientData!['sudoData']?['virtualAccount']?['data']?['attributes']?['bank']?['id'];
       final recipientBankName =
-          recipientData!['getAnchorData']?['virtualAccount']?['data']?['attributes']?['bank']?['name'];
+          recipientData!['sudoData']?['virtualAccount']?['data']?['attributes']?['bank']?['name'];
       final recipientAccountName =
-          recipientData!['getAnchorData']?['virtualAccount']?['data']?['attributes']?['accountName'];
+          recipientData!['sudoData']?['virtualAccount']?['data']?['attributes']?['accountName'];
 
       if (recipientAccountNumber == null || recipientBankId == null) {
         showSimpleDialog(
@@ -477,15 +473,13 @@ class _TagTransferPageState extends State<TagTransferPage> {
         return;
       }
 
-      // First transfer: user to company (book transfer — both on Anchor)
+      // First transfer: user to company (book transfer — both on Sudo)
       final amountNaira = double.parse(amountController.text);
       final fee = 0;
       final amountToCompanyKobo = (amountNaira + fee) * 100;
       final narration1 =
           'Ghost Mode to Company: ${remarkController.text.isNotEmpty ? remarkController.text : 'Transfer'}';
-      final firstResult = await FirebaseFunctions.instance
-          .httpsCallable('createBookTransfer')
-          .call({
+      final firstResult = await callCloudFunctionLogged('sudoTransferIntra', source: 'business_app', payload: {
         'fromAccountId': userAccountId,
         'toAccountId': companyVa['id'],
         'amount': amountToCompanyKobo,
@@ -517,9 +511,7 @@ class _TagTransferPageState extends State<TagTransferPage> {
       if (queryRecipientCp.docs.isNotEmpty) {
         recipientCounterpartyId = queryRecipientCp.docs.first.id;
       } else {
-        final createRecipientCpResult = await FirebaseFunctions.instance
-            .httpsCallable('createCounterparty')
-            .call({
+        final createRecipientCpResult = await callCloudFunctionLogged('sudoCreateCounterparty', source: 'business_app', payload: {
           'accountId': companyVa['id'],
           'bankId': recipientBankId, // recipient's bank id
           'accountType': companyVa['type'],
@@ -546,9 +538,7 @@ class _TagTransferPageState extends State<TagTransferPage> {
       final narration2 = remarkController.text.isNotEmpty
           ? remarkController.text
           : 'Ghost Mode Transfer';
-      final secondResult = await FirebaseFunctions.instance
-          .httpsCallable('createNipTransfer')
-          .call({
+      final secondResult = await callCloudFunctionLogged('sudoTransferNip', source: 'business_app', payload: {
         'accountType': companyVa['type'],
         'accountId': companyVa['id'],
         'counterpartyId': recipientCounterpartyId,
@@ -949,7 +939,7 @@ class _TagTransferPageState extends State<TagTransferPage> {
                                 }
                                 if (!sendAnonymously) {
                                   await _createCounterparty();
-                                  await _createNipTransfer();
+                                  await _sudoTransferNip();
                                 } else {
                                   await _ghostTransfer();
                                 }

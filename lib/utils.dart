@@ -92,6 +92,96 @@ const Color oxfordBlue = Color(0xFF14213D);
 const Color midnightBlue = Color(0xFF191970);
 const Color navyBlue = Color(0xFF242550);
 
+const Map<String, String> _callableNameAliases = {
+  'sudoBankList': 'safehavenBankList',
+  'sudoNameEnquiry': 'safehavenNameEnquiry',
+  'sudoCreateCounterparty': 'safehavenCreateCounterparty',
+  'sudoTransferNip': 'safehavenTransferNip',
+  'sudoTransferIntra': 'safehavenTransferIntra',
+  'sudoFetchAccountBalance': 'safehavenFetchAccountBalance',
+  'sudoFetchAccountNumber': 'safehavenFetchAccountNumber',
+  'sudoFetchDepositAccount': 'safehavenFetchAccountDetails',
+  'sudoGetServiceCategories': 'safehavenGetServiceCategories',
+  'sudoGetCategoryProducts': 'safehavenGetCategoryProducts',
+  'sudoVerifyVas': 'safehavenVerifyVas',
+  'sudoPurchaseVas': 'safehavenPurchaseVas',
+  'sudoCreateUser': 'safehavenCreateUser',
+  'sudoInitiateIdentityVerification': 'safehavenInitiateIdentityVerification',
+  'sudoValidateIdentityVerification': 'safehavenValidateIdentityVerification',
+  'sudoCreateSubAccount': 'safehavenCreateSubAccount',
+  'sudoCreateBusinessUser': 'safehavenCreateBusinessUser',
+  'sudoVerifyBusinessCustomer': 'safehavenVerifyBusinessCustomer',
+};
+
+String _resolveCallableName(String functionName) {
+  return _callableNameAliases[functionName] ?? functionName;
+}
+
+Map<String, dynamic>? getWalletContainer(Map<String, dynamic>? data) {
+  if (data == null) return null;
+  final safehavenData = data['safehavenData'];
+  if (safehavenData is Map<String, dynamic>) return safehavenData;
+  final sudoData = data['sudoData'];
+  if (sudoData is Map<String, dynamic>) return sudoData;
+  final anchorData = data['getAnchorData'];
+  if (anchorData is Map<String, dynamic>) return anchorData;
+  return null;
+}
+
+Map<String, dynamic>? getVirtualAccountData(Map<String, dynamic>? data) {
+  final wallet = getWalletContainer(data);
+  if (wallet == null) return null;
+
+  final virtualAccount = wallet['virtualAccount'];
+  if (virtualAccount is! Map<String, dynamic>) return null;
+
+  final inner = virtualAccount['data'];
+  if (inner is Map<String, dynamic>) return inner;
+
+  // Backward compatibility where virtualAccount itself may already be a data node.
+  if (virtualAccount['id'] != null) return virtualAccount;
+  return null;
+}
+
+String? getWalletTier(Map<String, dynamic>? data) {
+  final wallet = getWalletContainer(data);
+  final tier = wallet?['tier'] ?? data?['tier'];
+  return tier?.toString();
+}
+
+Future<HttpsCallableResult<dynamic>> callCloudFunctionLogged(
+  String functionName, {
+  dynamic payload,
+  FirebaseFunctions? functions,
+  String source = 'app',
+}) async {
+  final fx = functions ?? FirebaseFunctions.instance;
+  final resolvedFunctionName = _resolveCallableName(functionName);
+  final traceId = DateTime.now().microsecondsSinceEpoch.toString();
+  final payloadKeys = payload is Map
+      ? payload.keys.map((e) => e.toString()).toList()
+      : <String>[];
+
+  debugPrint(
+    '[CF:$functionName->$resolvedFunctionName][$source][$traceId] start keys=$payloadKeys',
+  );
+
+  try {
+    final callable = fx.httpsCallable(resolvedFunctionName);
+    final result = await callable.call(payload);
+    debugPrint('[CF:$functionName->$resolvedFunctionName][$source][$traceId] success');
+    return result;
+  } on FirebaseFunctionsException catch (e) {
+    debugPrint(
+      '[CF:$functionName->$resolvedFunctionName][$source][$traceId] FirebaseFunctionsException code=${e.code} message=${e.message}',
+    );
+    rethrow;
+  } catch (e) {
+    debugPrint('[CF:$functionName->$resolvedFunctionName][$source][$traceId] error=$e');
+    rethrow;
+  }
+}
+
 Future<void> saveUserDeviceToken(String userId) async {
   // Only save device token for main user (not stand users)
   final businessDoc = await FirebaseFirestore.instance
@@ -926,7 +1016,7 @@ Future<void> fetchAndPrintCustomer() async {
     }
 
     final customerId =
-        (snapshot.data()?['getAnchorData']['kybCreation']
+        (snapshot.data()?['sudoData']['kybCreation']
                 as Map<String, dynamic>?)?['data']?['id']
             as String?;
 
@@ -934,7 +1024,7 @@ Future<void> fetchAndPrintCustomer() async {
       print('ERROR: customerId not found at kybCreation.data.id');
     }
     final customerIdUser =
-        (snapshotuser.data()?['getAnchorData']['customerCreation']
+        (snapshotuser.data()?['sudoData']['customerCreation']
                 as Map<String, dynamic>?)?['data']?['id']
             as String?;
 
@@ -1058,9 +1148,7 @@ Future<Map<String, String?>> getCurrentAccountIdAndType() async {
     final String kycStatus = data['kycStatus'] ?? '';
 
     if (kycStatus == 'APPROVED') {
-      final Map<String, dynamic>? virtualAccData =
-          data['getAnchorData']?['virtualAccount']?['data']
-              as Map<String, dynamic>?;
+      final Map<String, dynamic>? virtualAccData = getVirtualAccountData(data);
 
       if (virtualAccData != null && virtualAccData['id'] != null) {
         final String accountId = virtualAccData['id'].toString();
@@ -1093,9 +1181,7 @@ Future<Map<String, String?>> getCurrentAccountIdAndType() async {
 
   if (userSnap.exists && userSnap.data() != null) {
     final data = userSnap.data()!;
-    final Map<String, dynamic>? virtualAccData =
-        data['getAnchorData']?['virtualAccount']?['data']
-            as Map<String, dynamic>?;
+    final Map<String, dynamic>? virtualAccData = getVirtualAccountData(data);
 
     if (virtualAccData != null && virtualAccData['id'] != null) {
       final String accountId = virtualAccData['id'].toString();
@@ -1184,13 +1270,13 @@ Future<String?> resolveBankIdByName(String? bankName) async {
 }
 
 /// Fetch account balance for the given account id using the backend function
-/// `fetchAccountBalance`. Returns the balance in the main currency unit
+/// `sudoFetchAccountBalance`. Returns the balance in the main currency unit
 /// (e.g. Naira) or 0.0 on error.
-Future<double> fetchAccountBalance(String accountId) async {
+Future<double> sudoFetchAccountBalance(String accountId) async {
   if (accountId.isEmpty) return 0.0;
   try {
     final callable = FirebaseFunctions.instance.httpsCallable(
-      'fetchAccountBalance',
+      'sudoFetchAccountBalance',
     );
     final result = await callable.call({'accountId': accountId});
     double balance = result.data['data']['availableBalance']?.toDouble() ?? 0.0;
@@ -1201,7 +1287,7 @@ Future<double> fetchAccountBalance(String accountId) async {
     } catch (_) {}
     return balance;
   } catch (e) {
-    debugPrint('utils.fetchAccountBalance error: $e');
+    debugPrint('utils.sudoFetchAccountBalance error: $e');
     return 0.0;
   }
 }
@@ -1214,7 +1300,7 @@ Future<double> fetchCurrentAccountBalance() async {
     final details = await getCurrentAccountIdAndType();
     final String? accountId = details['accountId'];
     if (accountId == null) return 0.0;
-    return await fetchAccountBalance(accountId);
+    return await sudoFetchAccountBalance(accountId);
   } catch (e) {
     debugPrint('utils.fetchCurrentAccountBalance error: $e');
     return 0.0;

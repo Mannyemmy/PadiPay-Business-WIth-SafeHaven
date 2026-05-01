@@ -424,8 +424,8 @@ Future<Map<String, dynamic>?> _fetchMerchantVirtualAccount() async {
       );
 
       if (data != null) {
-        final anchorData = data['getAnchorData'] as Map<String, dynamic>?;
-        dynamic vaRaw = anchorData?['virtualAccount']?['data'];
+        final sudoData = data['sudoData'] as Map<String, dynamic>?;
+        dynamic vaRaw = sudoData?['virtualAccount']?['data'];
 
         vaRaw ??= data['virtualAccount'];
 
@@ -466,9 +466,9 @@ Future<Map<String, dynamic>?> _fetchMerchantVirtualAccount() async {
         final data = userDoc.data();
         debugPrint('[Settlement] users doc keys: ${data?.keys.toList()}');
 
-        final vaRaw = data?['getAnchorData']?['virtualAccount']?['data'];
+        final vaRaw = data?['sudoData']?['virtualAccount']?['data'];
         debugPrint(
-          '[Settlement] users getAnchorData.virtualAccount.data present: ${vaRaw != null}',
+          '[Settlement] users sudoData.virtualAccount.data present: ${vaRaw != null}',
         );
 
         if (vaRaw != null) {
@@ -589,12 +589,12 @@ Future<Map<String, dynamic>?> _fetchMerchantVirtualAccount() async {
           }
 
           final Map<String, dynamic> updateData = {};
-          updateData['getAnchorData.virtualAccount.data.attributes.bank.id'] =
+          updateData['sudoData.virtualAccount.data.attributes.bank.id'] =
               fetchedBankId;
           updateData['bankId'] = fetchedBankId;
 
           if (existingBankName.isEmpty && fetchedBankName.isNotEmpty) {
-            updateData['getAnchorData.virtualAccount.data.attributes.bank.name'] =
+            updateData['sudoData.virtualAccount.data.attributes.bank.name'] =
                 fetchedBankName;
             updateData['bankName'] = fetchedBankName;
           }
@@ -1455,9 +1455,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
       return id;
     }
 
-    final createCp = await FirebaseFunctions.instance
-        .httpsCallable('createCounterparty')
-        .call({
+    final createCp = await callCloudFunctionLogged('sudoCreateCounterparty', source: 'business_app', payload: {
           'accountId': companyVa['id'],
           'bankId': merchantBankId,
           'accountType': companyVa['type'],
@@ -1628,10 +1626,8 @@ class _PaymentScreenState extends State<PaymentScreen> {
       final narration = 'NFC Payment Settlement - RRN $rrn';
       final idempotencyKey = const Uuid().v4();
 
-      // Book transfer: company VA → merchant VA (both on Anchor)
-      final result = await FirebaseFunctions.instance
-          .httpsCallable('createBookTransfer')
-          .call({
+      // Book transfer: company VA → merchant VA (both on Sudo)
+      final result = await callCloudFunctionLogged('sudoTransferIntra', source: 'business_app', payload: {
             'fromAccountId': companyVa['id'],
             'toAccountId': merchantVa['id'],
             'amount': amountKobo,
@@ -1640,7 +1636,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
             'idempotencyKey': idempotencyKey,
           });
 
-      debugPrint('[Settlement] createBookTransfer response: ${result.data}');
+      debugPrint('[Settlement] sudoTransferIntra response: ${result.data}');
 
       final dynamic responseData = result.data;
       Map<String, dynamic>? parsedResponse;

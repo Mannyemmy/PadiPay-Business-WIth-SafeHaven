@@ -64,7 +64,7 @@ class _AddPosStandState extends State<AddPosStand> {
         ownerBusinessId = uid;
       }
 
-      // 2. Check users collection (for anchor data + customer type)
+      // 2. Check users collection (for sudo data + customer type)
       final userDoc = await FirebaseFirestore.instance
           .collection('users')
           .doc(uid)
@@ -90,14 +90,14 @@ class _AddPosStandState extends State<AddPosStand> {
         // Merge data
         if (finalData == null) {
           finalData = Map<String, dynamic>.from(userData);
-        } else if (finalData['getAnchorData'] == null) {
-          finalData['getAnchorData'] = userData['getAnchorData'];
+        } else if (finalData['sudoData'] == null) {
+          finalData['sudoData'] = userData['sudoData'];
         }
 
         // Determine customerId
         customerId =
-            finalData['getAnchorData']?['kybCreation']?['data']?['id'] ??
-            finalData['getAnchorData']?['customerCreation']?['data']?['id'];
+            finalData['sudoData']?['kybCreation']?['data']?['id'] ??
+            finalData['sudoData']?['customerCreation']?['data']?['id'];
 
         // Determine accountType based on customerId
         if (customerId != null) {
@@ -120,7 +120,7 @@ class _AddPosStandState extends State<AddPosStand> {
 
       // Final customerId fallback
       if (customerId == null && finalData != null) {
-        customerId = finalData['customerId'] ?? finalData['anchorCustomerId'];
+        customerId = finalData['customerId'] ?? finalData['sudoCustomerId'];
       }
 
       print(
@@ -152,13 +152,13 @@ class _AddPosStandState extends State<AddPosStand> {
         return;
       }
 
-      print('Calling fetchAccountNumber for accountId: $accountId');
+      print('Calling sudoFetchAccountNumber for accountId: $accountId');
 
       final callable = FirebaseFunctions.instance.httpsCallable(
-        'fetchAccountNumber',
+        'sudoFetchAccountNumber',
       );
       final result = await callable.call({'accountId': accountId});
-      print('fetchAccountNumber response: ${result.data}');
+      print('sudoFetchAccountNumber response: ${result.data}');
 
       dynamic resp = result.data;
       String? accountNumber;
@@ -191,7 +191,7 @@ class _AddPosStandState extends State<AddPosStand> {
       }
 
       if (accountNumber == null && bankName == null) {
-        print('fetchAccountNumber: no accountNumber or bank found in response');
+        print('sudoFetchAccountNumber: no accountNumber or bank found in response');
         // Even if function says "not found", try to extract from the raw response anyway
         print('Raw response was: $resp');
         return;
@@ -347,7 +347,7 @@ class _AddPosStandState extends State<AddPosStand> {
       // 1. Create Electronic Account
       final functions = FirebaseFunctions.instance;
       final createAccountFunc = functions.httpsCallable(
-        'createElectronicAccount',
+        'safehavenCreateSubAccount',
       );
       final idempotencyKey = const Uuid().v4();
 

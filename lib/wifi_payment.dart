@@ -979,7 +979,7 @@ class _DevicesListScreenState extends State<DevicesListScreen>
           // Auto-accept: include receiver VA details in the reply so the sender can settle the payment.
           final currentUser = FirebaseAuth.instance.currentUser!;
           final userDoc = await FirebaseFirestore.instance.collection('users').doc(currentUser.uid).get();
-          final vaData = userDoc.data()?['getAnchorData']?['virtualAccount']?['data'];
+          final vaData = getVirtualAccountData(userDoc.data());
           if (vaData == null) {
             // cannot accept — inform sender
             Nearby().sendBytesPayload(id, utf8.encode(jsonEncode({'type': 'payment_rejected', 'reason': 'receiver_account_missing'})));
@@ -1038,7 +1038,7 @@ class _DevicesListScreenState extends State<DevicesListScreen>
             if (accept == true) {
               final currentUser = FirebaseAuth.instance.currentUser!;
               final userDoc = await FirebaseFirestore.instance.collection('users').doc(currentUser.uid).get();
-              final vaData = userDoc.data()?['getAnchorData']?['virtualAccount']?['data'];
+              final vaData = getVirtualAccountData(userDoc.data());
               if (vaData == null) {
                 Nearby().sendBytesPayload(id, utf8.encode(jsonEncode({'type': 'payment_rejected', 'reason': 'receiver_account_missing'})));
                 showToast('Your account is not configured to receive payments', Colors.red);
@@ -1359,14 +1359,14 @@ Future<String> _getUserNameById(String userId) async {
         return false;
       }
 
-      final userDoc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
-      final accountId = userDoc.data()?['getAnchorData']?['virtualAccount']?['data']?['id'];
+      final accountDetails = await getCurrentAccountIdAndType();
+      final accountId = accountDetails['accountId']?.toString();
       if (accountId == null) {
         showToast('Account details not found', Colors.red);
         return false;
       }
 
-      // Recipient's Anchor account ID is in the WiFi acceptance payload
+      // Recipient's Sudo account ID is in the WiFi acceptance payload
       final toAccountId = payload['accountId']?.toString();
       if (toAccountId == null || toAccountId.isEmpty) {
         showToast('Recipient account ID not found', Colors.red);
@@ -1378,18 +1378,16 @@ Future<String> _getUserNameById(String userId) async {
       final recipientBankName = payload['bankName'];
       final recipientAccountName = payload['accountName'];
 
-      final ownAccountNumber = userDoc.data()?['getAnchorData']?['virtualAccount']?['data']?['attributes']?['accountNumber']?.toString();
+      final ownAccountNumber = accountDetails['accountNumber']?.toString();
       if (ownAccountNumber != null && ownAccountNumber == recipientAccountNumber) {
         showToast('You cannot send money to your own account', Colors.red);
         return false;
       }
 
-      // Book transfer (both parties on Anchor — no counterparty needed)
+      // Book transfer (both parties on Sudo — no counterparty needed)
       final amountKobo = (amount * 100).toInt();
-      debugPrint('createBookTransfer: from=$accountId to=$toAccountId amount=$amountKobo');
-      final transferResult = await FirebaseFunctions.instance
-          .httpsCallable('createBookTransfer')
-          .call({
+      debugPrint('sudoTransferIntra: from=$accountId to=$toAccountId amount=$amountKobo');
+      final transferResult = await callCloudFunctionLogged('sudoTransferIntra', source: 'business_app', payload: {
         'fromAccountId': accountId,
         'toAccountId': toAccountId,
         'amount': amountKobo,

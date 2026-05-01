@@ -20,13 +20,13 @@ import 'package:padi_pay_business/kyb/business_upgrade_manager.dart';
 import 'package:padi_pay_business/profile/profile_page.dart';
 import 'package:padi_pay_business/storefront/storefront_management_page.dart';
 import 'package:padi_pay_business/super_agent/super_agent_hub.dart';
+import 'package:padi_pay_business/padi_book/padi_book_page.dart';
 import 'package:padi_pay_business/transactions_history.dart'
     hide TransactionItem;
 import 'package:padi_pay_business/transfer/transfer_funds_page.dart';
 import 'package:padi_pay_business/transfer_details.dart';
 import 'package:padi_pay_business/ui/bottom_nav_bar.dart';
 import 'package:padi_pay_business/utils.dart';
-import 'package:padi_pay_business/padi_book/padi_book_page.dart';
 import 'package:padi_pay_business/payment_screen.dart';
 import 'package:padi_pay_business/wifi_payment.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -346,7 +346,7 @@ class _HomePageState extends State<HomePage> {
       debugPrint('Error loading active stand ID: $e');
     }
   }
-  // Balance fetching is now centralized in `utils.fetchAccountBalance`.
+  // Balance fetching is now centralized in `utils.sudoFetchAccountBalance`.
 
   Future<void> _checkForUpdate() async {
     if (!Platform.isAndroid) return;
@@ -511,7 +511,7 @@ class _HomePageState extends State<HomePage> {
                   final standAccountId = standDataMap?['id'];
                   if (standAccountId != null) {
                     try {
-                      bal = await fetchAccountBalance(standAccountId);
+                      bal = await sudoFetchAccountBalance(standAccountId);
                     } catch (e) {
                       debugPrint('Error fetching stand balance (early): $e');
                       bal = 0.0;
@@ -560,8 +560,8 @@ class _HomePageState extends State<HomePage> {
             (data['requiredDocuments'] as List).isNotEmpty;
 
         if (isKybApproved) {
-          var getAnchorData = data['getAnchorData'];
-          businessAccountId = getAnchorData?['virtualAccount']?['data']?['id'];
+          final virtualAccData = getVirtualAccountData(data);
+          businessAccountId = virtualAccData?['id']?.toString();
 
           // If APPROVED but no virtual account yet → special banner + fallback to personal
           if (businessAccountId == null) {
@@ -578,7 +578,7 @@ class _HomePageState extends State<HomePage> {
           final resolvedAccountId = acct['accountId'];
           if (resolvedAccountId != null) {
             try {
-              bal = await fetchAccountBalance(resolvedAccountId);
+              bal = await sudoFetchAccountBalance(resolvedAccountId);
             } catch (e) {
               debugPrint('Error fetching balance for resolved account id: $e');
             }
@@ -645,9 +645,9 @@ class _HomePageState extends State<HomePage> {
           }
         }
 
-        var getAnchorData = data['getAnchorData'];
+        final virtualAccData = getVirtualAccountData(data);
         String? accNum =
-            getAnchorData?['virtualAccount']?['data']?['attributes']?['accountNumber'];
+          virtualAccData?['attributes']?['accountNumber']?.toString();
         // If account number missing, attempt to fetch authoritative data and update Firestore
         if (accNum == null || accNum.toString().isEmpty) {
           await _fetchAndUpdateVirtualAccount(
@@ -658,14 +658,12 @@ class _HomePageState extends State<HomePage> {
               .collection('businesses')
               .doc(uid)
               .get();
-          accNum =
-              refreshed
-                      .data()?['getAnchorData']?['virtualAccount']?['data']?['attributes']?['accountNumber']
-                  as String?;
+            accNum = getVirtualAccountData(refreshed.data())?['attributes']?['accountNumber']
+              ?.toString();
         }
         busPhone = accNum ?? busPhone;
 
-        bal = await fetchAccountBalance(businessAccountId);
+        bal = await sudoFetchAccountBalance(businessAccountId);
 
         isBusinessAccount = true;
         setState(() {
@@ -740,7 +738,7 @@ class _HomePageState extends State<HomePage> {
               parentBusinessName = busName;
               final standAccountId = standDataMap?['id'];
               if (standAccountId != null) {
-                bal = await fetchAccountBalance(standAccountId);
+                bal = await sudoFetchAccountBalance(standAccountId);
               } else {
                 bal = 0.0;
               }
@@ -764,14 +762,13 @@ class _HomePageState extends State<HomePage> {
           isBusinessAccount = false;
           if (userSnap.exists) {
             Map<String, dynamic> data = userSnap.data() as Map<String, dynamic>;
-            if (data.containsKey('getAnchorData') &&
-                data['getAnchorData'] != null) {
+            final personalVirtualAcc = getVirtualAccountData(data);
+            if (personalVirtualAcc != null) {
               String? accNum =
-                  data['getAnchorData']?['virtualAccount']?['data']?['attributes']?['accountNumber'];
+                personalVirtualAcc['attributes']?['accountNumber']?.toString();
               // If missing, attempt to fetch and update
               final personalAccountId =
-                  data['getAnchorData']?['virtualAccount']?['data']?['id']
-                      as String?;
+                personalVirtualAcc['id']?.toString();
               if ((accNum == null || accNum.toString().isEmpty) &&
                   personalAccountId != null) {
                 await _fetchAndUpdateVirtualAccount(
@@ -782,18 +779,16 @@ class _HomePageState extends State<HomePage> {
                     .collection('users')
                     .doc(uid)
                     .get();
-                accNum =
-                    refreshed
-                            .data()?['getAnchorData']?['virtualAccount']?['data']?['attributes']?['accountNumber']
-                        as String?;
+                accNum = getVirtualAccountData(refreshed.data())?['attributes']?['accountNumber']
+                  ?.toString();
               }
 
               busPhone = accNum ?? 'N/A';
-              tier = data['getAnchorData']?['tier'] ?? 0;
-              String? personalAccountId2 =
-                  data['getAnchorData']?['virtualAccount']?['data']?['id'];
+                tier = int.tryParse(getWalletTier(data) ?? '0') ?? 0;
+                String? personalAccountId2 =
+                  personalVirtualAcc['id']?.toString();
               if (personalAccountId2 != null) {
-                bal = await fetchAccountBalance(personalAccountId2);
+                bal = await sudoFetchAccountBalance(personalAccountId2);
               }
             } else {
               busPhone = 'N/A';
@@ -901,7 +896,7 @@ class _HomePageState extends State<HomePage> {
             double standBalance = 0.0;
             if (standAccountId != null) {
               try {
-                standBalance = await fetchAccountBalance(standAccountId);
+                standBalance = await sudoFetchAccountBalance(standAccountId);
               } catch (e) {
                 debugPrint('Error fetching stand balance: $e');
               }
@@ -1024,18 +1019,18 @@ class _HomePageState extends State<HomePage> {
   }
 
   // Fetch authoritative bank and accountNumber for a given virtual accountId,
-  // then update Firestore (getAnchorData.virtualAccount.data.attributes.*) and local UI.
+  // then update Firestore wallet attributes for both safehavenData and sudoData.
   Future<void> _fetchAndUpdateVirtualAccount(
     String accountId,
     DocumentReference userDocRef,
   ) async {
     try {
-      print('Calling fetchAccountNumber for accountId: $accountId');
+      print('Calling sudoFetchAccountNumber for accountId: $accountId');
       final callable = FirebaseFunctions.instance.httpsCallable(
-        'fetchAccountNumber',
+        'sudoFetchAccountNumber',
       );
       final result = await callable.call({'accountId': accountId});
-      print('fetchAccountNumber response: ${result.data}');
+      print('sudoFetchAccountNumber response: ${result.data}');
 
       dynamic resp = result.data;
       String? accountNumber;
@@ -1057,17 +1052,22 @@ class _HomePageState extends State<HomePage> {
       }
 
       if (accountNumber == null && bankName == null) {
-        print('fetchAccountNumber: no accountNumber or bank found in response');
+        print('sudoFetchAccountNumber: no accountNumber or bank found in response');
         return;
       }
 
       final updates = <String, dynamic>{};
       if (accountNumber != null) {
-        updates['getAnchorData.virtualAccount.data.attributes.accountNumber'] =
+        updates['sudoData.virtualAccount.data.attributes.accountNumber'] =
+            accountNumber;
+        updates['safehavenData.virtualAccount.data.attributes.accountNumber'] =
             accountNumber;
       }
       if (bankName != null) {
-        updates['getAnchorData.virtualAccount.data.attributes.bank'] = {
+        updates['sudoData.virtualAccount.data.attributes.bank'] = {
+          'name': bankName,
+        };
+        updates['safehavenData.virtualAccount.data.attributes.bank'] = {
           'name': bankName,
         };
       }
@@ -1253,7 +1253,7 @@ class _HomePageState extends State<HomePage> {
       // Fetch and update balance if we have an account id
       if (accountId != null) {
         try {
-          final newBal = await fetchAccountBalance(accountId);
+          final newBal = await sudoFetchAccountBalance(accountId);
           setState(() {
             businesses[index]['balance'] = newBal;
             userName = selectedBusiness['name'] ?? parentName;
@@ -2387,7 +2387,7 @@ class _HomePageState extends State<HomePage> {
                                                 .doc(uid);
                                         final createAccountFunc = functions
                                             .httpsCallable(
-                                              'createElectronicAccount',
+                                              'safehavenCreateSubAccount',
                                             );
                                         final idempotencyKey = Uuid().v4();
                                         final accountPayload = {
@@ -2397,7 +2397,7 @@ class _HomePageState extends State<HomePage> {
                                           'idempotencyKey': idempotencyKey,
                                         };
                                         print(
-                                          'Sending createElectronicAccount payload: $accountPayload',
+                                          'Sending sudoCreateSubAccount payload: $accountPayload',
                                         );
                                         final createAccountResult =
                                             await createAccountFunc.call(
@@ -2407,7 +2407,7 @@ class _HomePageState extends State<HomePage> {
                                           'Create Electronic Account Response: ${createAccountResult.data}',
                                         );
                                         await docRef.update({
-                                          'getAnchorData.virtualAccount':
+                                          'sudoData.virtualAccount':
                                               createAccountResult.data,
                                         });
                                         showToast(
@@ -3103,6 +3103,11 @@ class _HomePageState extends State<HomePage> {
                         'MMMM d, yyyy',
                       ).format(date);
                       final initialName =
+                          data['senderName'] ??
+                          data['senderAccountName'] ??
+                          data['originatorName'] ??
+                          data['nameEnquiry']?['accountName'] ??
+                          data['api_response']?['data']?['attributes']?['nameEnquiry']?['accountName'] ??
                           data['recipientName'] ??
                           data['phoneNumber'] ??
                           data['meterNumber'] ??

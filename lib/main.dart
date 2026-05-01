@@ -211,9 +211,7 @@ Future<void> preloadBanks() async {
     final snapshot =
         await FirebaseFirestore.instance.collection('banks').get();
     if (snapshot.docs.isEmpty) {
-      final result = await FirebaseFunctions.instance
-          .httpsCallable('getAllBanks')
-          .call();
+      final result = await callCloudFunctionLogged('sudoBankList', source: 'business_app');
 
       final data = result.data['data'] as List;
       final batch = FirebaseFirestore.instance.batch();
@@ -237,16 +235,18 @@ Future<void> preloadBalance() async {
         .doc(user.uid)
         .get();
 
-    final anchor = userDoc.data()?['getAnchorData'];
-    if (anchor == null) return;
+    final sudo = userDoc.data()?['sudoData'];
+    if (sudo == null) return;
 
     final accountId =
-        anchor['virtualAccount']?['data']?['id']?.toString();
+        sudo['virtualAccount']?['data']?['id']?.toString();
     if (accountId == null) return;
 
-    final callable =
-        FirebaseFunctions.instance.httpsCallable('fetchAccountBalance');
-    final result = await callable.call({'accountId': accountId});
+    final result = await callCloudFunctionLogged(
+      'sudoFetchAccountBalance',
+      source: 'main.dart',
+      payload: {'accountId': accountId},
+    );
 
     double balance =
         result.data['data']['availableBalance']?.toDouble() ?? 0.0;

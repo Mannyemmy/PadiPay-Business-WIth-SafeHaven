@@ -41,19 +41,35 @@ class _BuyAirtimePageState extends State<BuyAirtimePage> {
     _fetchUserAccount();
   }
 
+  Future<DocumentSnapshot<Map<String, dynamic>>> _fetchPreferredAccountDoc() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) throw Exception('User not authenticated');
+
+    final businessDoc = await FirebaseFirestore.instance
+        .collection('businesses')
+        .doc(user.uid)
+        .get();
+    if (businessDoc.exists && getWalletContainer(businessDoc.data()) != null) {
+      return businessDoc;
+    }
+
+    return FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .get();
+  }
+
   Future<void> _fetchUserAccount() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
 
-    final userDoc = await FirebaseFirestore.instance
-        .collection('users')
-        .doc(user.uid)
-        .get();
-    if (userDoc.exists) {
+    final accountDoc = await _fetchPreferredAccountDoc();
+    final data = accountDoc.data();
+    if (accountDoc.exists && data != null) {
       setState(() {
-        userAccount = userDoc.data()?['getAnchorData']?['virtualAccount'];
+        userAccount = getWalletContainer(data)?['virtualAccount'];
         cashbackBalance =
-            (userDoc.data()?['cashback']?['balance'] as num?)?.toDouble() ?? 0;
+            (data['cashback']?['balance'] as num?)?.toDouble() ?? 0;
       });
       _fetchBillers();
     }
@@ -82,10 +98,11 @@ class _BuyAirtimePageState extends State<BuyAirtimePage> {
         billerList = List<Map<String, dynamic>>.from(data?['data'] ?? []);
       }
       if (billerList.isEmpty) {
-        final callable = FirebaseFunctions.instance.httpsCallable(
-          'listBillers',
+        final result = await callCloudFunctionLogged(
+          'sudoGetServiceCategories',
+          source: 'buy_airtime.dart',
+          payload: {'category': 'airtime'},
         );
-        final result = await callable.call({'category': 'airtime'});
         final response = Map<String, dynamic>.from(result.data);
         print('Airtime Billers Response: $response');
         if (response['data'] is List) {
@@ -98,7 +115,8 @@ class _BuyAirtimePageState extends State<BuyAirtimePage> {
       setState(() {
         airtimeBillers = billerList;
         selectedProvider = airtimeBillers.isNotEmpty
-            ? airtimeBillers[0]['attributes']['slug'] as String
+            ? (airtimeBillers[0]['id']?.toString() ??
+                  airtimeBillers[0]['attributes']['slug'] as String)
             : null;
         isFetchingBillers = false;
       });
@@ -168,12 +186,13 @@ class _BuyAirtimePageState extends State<BuyAirtimePage> {
                           biller['attributes']?['name'] as String? ?? 'Unknown';
                       final slug =
                           biller['attributes']?['slug'] as String? ?? '';
-                      final isSelected = selectedProvider == slug;
+                      final providerId = biller['id']?.toString() ?? slug;
+                      final isSelected = selectedProvider == providerId;
 
                       return GestureDetector(
                         onTap: () {
                           setState(() {
-                            selectedProvider = slug;
+                            selectedProvider = providerId;
                           });
                           Navigator.pop(context);
                         },
@@ -314,10 +333,10 @@ class _BuyAirtimePageState extends State<BuyAirtimePage> {
         formattedPhone = '234${formattedPhone.substring(1)}';
       }
 
-      final callable = FirebaseFunctions.instance.httpsCallable(
-        'initiateBillPayment',
-      );
-      final result = await callable.call({
+      final result = await callCloudFunctionLogged(
+        'sudoPurchaseVas',
+        source: 'buy_airtime.dart',
+        payload: {
         'type': 'Airtime',
         'accountId': userAccount!['data']['id'],
         'accountType': userAccount!['data']['type'],
@@ -532,20 +551,16 @@ class _BuyAirtimePageState extends State<BuyAirtimePage> {
                               Flexible(
                                 child: Text(
                                   selectedProvider != null
-                                      ? (airtimeBillers
-                                                .where(
-                                                  (b) =>
-                                                      b['attributes']['slug'] ==
-                                                      selectedProvider,
-                                                )
-                                                .isNotEmpty
-                                            ? airtimeBillers
-                                                  .where(
-                                                    (b) =>
-                                                        b['attributes']['slug'] ==
-                                                        selectedProvider,
-                                                  )
-                                                  .first['attributes']['name']
+                                      ? (airtimeBillers.where((b) {
+                                        final slug = b['attributes']?['slug']?.toString();
+                                        return b['id']?.toString() == selectedProvider ||
+                                            slug == selectedProvider;
+                                          }).isNotEmpty
+                                        ? airtimeBillers.where((b) {
+                                          final slug = b['attributes']?['slug']?.toString();
+                                          return b['id']?.toString() == selectedProvider ||
+                                          slug == selectedProvider;
+                                        }).first['attributes']['name']
                                             : selectedProvider)
                                       : 'Select provider',
                                   overflow: TextOverflow.ellipsis,

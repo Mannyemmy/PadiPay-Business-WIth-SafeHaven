@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -14,7 +14,7 @@ import 'package:padi_pay_business/transactions_history.dart';
 import 'package:padi_pay_business/ui/bottom_nav_bar.dart';
 import 'package:padi_pay_business/utils.dart';
 
-/// Unified entry model for PadiBook — covers both manual entries (from
+/// Unified entry model for PadiBook � covers both manual entries (from
 /// padiBook/entries) and auto-generated rows from the transactions collection.
 class _Entry {
   final String key;           // unique widget key
@@ -56,7 +56,7 @@ class PadiBookPage extends StatefulWidget {
 class _PadiBookPageState extends State<PadiBookPage> {
   int _selectedIndex = 5;
   final String _uid = FirebaseAuth.instance.currentUser!.uid;
-  final _currencyFormat = NumberFormat.currency(symbol: '₦', decimalDigits: 2);
+  final _currencyFormat = NumberFormat.currency(symbol: '?', decimalDigits: 2);
 
   // stream subscriptions
   StreamSubscription<QuerySnapshot>? _padiSub;
@@ -71,7 +71,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
 
   List<String> _recentLabels = [];
 
-  // ── POS Agent state ──────────────────────────────────────────────────────
+  // -- POS Agent state ------------------------------------------------------
   StreamSubscription<DocumentSnapshot>? _posSub;
   StreamSubscription<QuerySnapshot>? _posExclusionSub;
   StreamSubscription<QuerySnapshot>? _posDailyLogSub;
@@ -80,7 +80,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
   double _posCashAtHand = 0;
   DateTime? _posCashAtHandDate;
   Set<String> _posExcludedIds = {}; // tx IDs excluded from POS tracking
-  // key: 'YYYY-MM-DD' → {cashAtHand: double, note: String}
+  // key: 'YYYY-MM-DD' ? {cashAtHand: double, note: String}
   Map<String, Map<String, dynamic>> _posDailyLog = {};
   DateTime _posDashboardDate = DateTime.now(); // which day the POS dashboard shows
 
@@ -105,7 +105,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
   void initState() {
     super.initState();
 
-    // — padiBook entries stream —
+    // � padiBook entries stream �
     _padiSub = FirebaseFirestore.instance
         .collection('padiBook')
         .doc(_uid)
@@ -135,7 +135,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
       onError: (e, st) => debugPrint('[PadiBook] entries stream error: $e\n$st'),
     );
 
-    // — transactions stream (same filter as TagTransactionsPage) —
+    // � transactions stream (same filter as TagTransactionsPage) �
     _txSub = FirebaseFirestore.instance
         .collection('transactions')
         .where(
@@ -161,7 +161,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
       onError: (e, st) => debugPrint('[PadiBook] tx stream error: $e\n$st'),
     );
 
-    // — POS agent settings stream —
+    // � POS agent settings stream �
     _posSub = FirebaseFirestore.instance
         .collection('posAgent')
         .doc(_uid)
@@ -188,7 +188,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
       onError: (e, st) => debugPrint('[PadiBook] pos stream error: $e\n$st'),
     );
 
-    // — POS exclusions stream —
+    // � POS exclusions stream �
     _posExclusionSub = FirebaseFirestore.instance
         .collection('posAgent')
         .doc(_uid)
@@ -205,7 +205,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
           debugPrint('[PadiBook] pos exclusions stream error: $e\n$st'),
     );
 
-    // — POS daily log stream (cash-at-hand snapshots per day) —
+    // � POS daily log stream (cash-at-hand snapshots per day) �
     _posDailyLogSub = FirebaseFirestore.instance
         .collection('posAgent')
         .doc(_uid)
@@ -225,7 +225,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
     );
   }
 
-  // ── Auto-categorisation helpers ───────────────────────────────────────────
+  // -- Auto-categorisation helpers -------------------------------------------
 
   static String _txStatusString(Map<String, dynamic> d) {
     if (d['api_response']?['data']?['attributes']?['status'] != null) {
@@ -243,7 +243,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
   }
 
   static bool _isSuccessfulStatus(String status) {
-    // Anchor statuses: 'approved', 'successful', 'success', 'processed'
+    // Sudo statuses: 'approved', 'successful', 'success', 'processed'
     // Our NFC statuses: 'success'
     // Exclude: 'failed', 'pending', 'cancelled', 'reversed', 'unknown'
     const successStates = {'approved', 'successful', 'success', 'processed'};
@@ -308,7 +308,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
       case 'anonymous_transfer':
         return 'Anonymous Transfer';
       case 'bill_payment':
-        return otherName.isNotEmpty ? 'Bill – $otherName' : 'Bill Payment';
+        return otherName.isNotEmpty ? 'Bill � $otherName' : 'Bill Payment';
       case 'deposit':
         return otherName.isNotEmpty ? 'Transfer from $otherName' : 'Deposit';
       default:
@@ -334,7 +334,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
     return DateTime.fromMillisecondsSinceEpoch(0);
   }
 
-  // ── Merged entry list ─────────────────────────────────────────────────────
+  // -- Merged entry list -----------------------------------------------------
 
   List<_Entry> _getMergedEntries() {
     final entries = <_Entry>[];
@@ -532,7 +532,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // Hero question — same as tag transaction
+                        // Hero question � same as tag transaction
                         Text(
                           'What was this for?',
                           style: GoogleFonts.inter(
@@ -550,14 +550,14 @@ class _PadiBookPageState extends State<PadiBookPage> {
                           ),
                         ),
                         const SizedBox(height: 22),
-                        // Label field — first and autofocused, same as tag transaction
+                        // Label field � first and autofocused, same as tag transaction
                         TextField(
                           controller: labelCtrl,
                           autofocus: true,
                           textCapitalization: TextCapitalization.sentences,
                           style: GoogleFonts.inter(fontSize: 16),
                           decoration: InputDecoration(
-                            hintText: 'bread, fuel, salary…',
+                            hintText: 'bread, fuel, salary�',
                             hintStyle: TextStyle(color: Colors.grey.shade400),
                             filled: true,
                             fillColor: Colors.grey.shade50,
@@ -641,7 +641,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                                 ),
                               ),
                               _SegmentTab(
-                                label: '− Expense',
+                                label: '- Expense',
                                 isSelected: selectedCategory == 'expense',
                                 color: Colors.red.shade400,
                                 onTap: () => setModal(
@@ -652,7 +652,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                           ),
                         ),
                         const SizedBox(height: 16),
-                        // Amount field — after label, matches tag transaction flow
+                        // Amount field � after label, matches tag transaction flow
                         TextField(
                           controller: amountCtrl,
                           keyboardType: const TextInputType.numberWithOptions(
@@ -669,7 +669,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                               fontSize: 20,
                               fontWeight: FontWeight.w600,
                             ),
-                            prefixText: '₦ ',
+                            prefixText: '? ',
                             prefixStyle: GoogleFonts.inter(
                               fontSize: 20,
                               fontWeight: FontWeight.w600,
@@ -736,7 +736,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                             textCapitalization: TextCapitalization.sentences,
                             style: GoogleFonts.inter(fontSize: 15),
                             decoration: InputDecoration(
-                              hintText: 'Add a note…',
+                              hintText: 'Add a note�',
                               hintStyle:
                                   TextStyle(color: Colors.grey.shade400),
                               filled: true,
@@ -978,7 +978,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                       controller: addLabelCtrl,
                       textCapitalization: TextCapitalization.sentences,
                       decoration: InputDecoration(
-                        hintText: 'Type a label to add…',
+                        hintText: 'Type a label to add�',
                         hintStyle: TextStyle(color: Colors.grey.shade400),
                         filled: true,
                         fillColor: Colors.grey.shade50,
@@ -1187,7 +1187,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                       ListTile(
                         leading: const Icon(Icons.block_outlined, color: Colors.orange),
                         title: const Text('Exclude from POS tracking'),
-                        subtitle: const Text('Personal transfer — not a POS transaction'),
+                        subtitle: const Text('Personal transfer � not a POS transaction'),
                         onTap: () async {
                           Navigator.pop(ctx);
                           try {
@@ -1309,7 +1309,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                           child: Row(children: [
                             _SegmentTab(label: '+ Income', isSelected: selectedCategory == 'income',
                                 color: Colors.green, onTap: () => setModal(() => selectedCategory = 'income')),
-                            _SegmentTab(label: '− Expense', isSelected: selectedCategory == 'expense',
+                            _SegmentTab(label: '- Expense', isSelected: selectedCategory == 'expense',
                                 color: Colors.red.shade400, onTap: () => setModal(() => selectedCategory = 'expense')),
                           ]),
                         ),
@@ -1398,7 +1398,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
     );
   }
 
-  // ── POS Agent Dashboard ───────────────────────────────────────────────────
+  // -- POS Agent Dashboard ---------------------------------------------------
 
   void _showPosCashOutSheet(
     List<Map<String, dynamic>> rows,
@@ -1440,7 +1440,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                           color: Colors.red.shade400, size: 18),
                       const SizedBox(width: 8),
                       Expanded(
-                        child: Text('Cash Given Out — $dayLabel',
+                        child: Text('Cash Given Out � $dayLabel',
                             style: GoogleFonts.inter(
                                 fontWeight: FontWeight.bold,
                                 fontSize: 15,
@@ -1584,7 +1584,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                                   Expanded(
                                     flex: 2,
                                     child: Text(
-                                        '−${cf.format(cashOut)}',
+                                        '-${cf.format(cashOut)}',
                                         textAlign: TextAlign.right,
                                         style: TextStyle(
                                             fontSize: 12,
@@ -1649,7 +1649,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                       const Icon(Icons.trending_up, color: primaryColor, size: 18),
                       const SizedBox(width: 8),
                       Expanded(
-                        child: Text('Charges Breakdown — $dayLabel',
+                        child: Text('Charges Breakdown � $dayLabel',
                             style: GoogleFonts.inter(
                                 fontWeight: FontWeight.bold,
                                 fontSize: 15,
@@ -1672,7 +1672,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       _BreakdownSummaryChip(label: 'Gross', value: cf.format(totalCharges), color: Colors.blueGrey),
-                      const Text('−', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
+                      const Text('-', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
                       _BreakdownSummaryChip(label: 'Bank 0.25%', value: cf.format(totalBankCharges), color: Colors.red.shade400),
                       const Text('=', style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold)),
                       _BreakdownSummaryChip(label: 'Net', value: cf.format(netProfit), color: Colors.green),
@@ -1751,7 +1751,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                                   ),
                                   Expanded(
                                     flex: 2,
-                                    child: Text('−${cf.format(bank)}',
+                                    child: Text('-${cf.format(bank)}',
                                         textAlign: TextAlign.right,
                                         style: TextStyle(
                                             fontSize: 12,
@@ -1881,7 +1881,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Header with day navigation ──────────────────────────────
+          // -- Header with day navigation ------------------------------
           Container(
             padding: const EdgeInsets.fromLTRB(12, 12, 12, 10),
             decoration: BoxDecoration(
@@ -1900,7 +1900,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                           fontSize: 13,
                           color: primaryColor)),
                 ),
-                // ◀ prev day
+                // ? prev day
                 GestureDetector(
                   onTap: () => setState(() => _posDashboardDate =
                       _posDashboardDate.subtract(const Duration(days: 1))),
@@ -1951,7 +1951,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                     ),
                   ),
                 ),
-                // ▶ next day (disabled on today)
+                // ? next day (disabled on today)
                 GestureDetector(
                   onTap: isToday
                       ? null
@@ -2058,7 +2058,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          'Gross ${cf.format(totalCharges)}  −  Bank 0.25% ${cf.format(totalBankCharges)}  =  Net ${cf.format(netProfit)}',
+                          'Gross ${cf.format(totalCharges)}  -  Bank 0.25% ${cf.format(totalBankCharges)}  =  Net ${cf.format(netProfit)}',
                           style: TextStyle(fontSize: 11, color: Colors.green.shade800),
                         ),
                       ),
@@ -2098,7 +2098,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                                     fontWeight: FontWeight.w500)),
                             const SizedBox(height: 2),
                             Text(
-                              '${cf.format(cashAtHand)} − ${cf.format(totalCashOut)} = ${cf.format(expectedCash)}',
+                              '${cf.format(cashAtHand)} - ${cf.format(totalCashOut)} = ${cf.format(expectedCash)}',
                               style: GoogleFonts.inter(
                                   fontWeight: FontWeight.bold,
                                   fontSize: 12,
@@ -2132,7 +2132,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                             const SizedBox(width: 8),
                             Expanded(
                               child: Text(
-                                'No charge tiers set — tap to configure',
+                                'No charge tiers set � tap to configure',
                                 style: TextStyle(
                                     color: Colors.amber.shade800,
                                     fontSize: 12),
@@ -2283,7 +2283,7 @@ class _PadiBookPageState extends State<PadiBookPage> {
                   }),
                 ),
                 const SizedBox(height: 16),
-                // ── POS Agent Dashboard (only when enabled) ───────────────
+                // -- POS Agent Dashboard (only when enabled) ---------------
                 if (_posEnabled)
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 20),
@@ -2717,7 +2717,7 @@ class _SummaryCard extends StatelessWidget {
     final fmt = DateFormat('d MMM yyyy');
     if (dateFrom == null && dateTo == null) return 'All time';
     if (dateFrom != null && dateTo != null) {
-      return '${fmt.format(dateFrom!)} – ${fmt.format(dateTo!)}';
+      return '${fmt.format(dateFrom!)} � ${fmt.format(dateTo!)}';
     }
     if (dateFrom != null) return 'From ${fmt.format(dateFrom!)}';
     return 'Up to ${fmt.format(dateTo!)}';
@@ -2726,7 +2726,7 @@ class _SummaryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final net = totalIncome - totalExpense;
-    final netSign = net >= 0 ? '+' : '−';
+    final netSign = net >= 0 ? '+' : '-';
     return Container(
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
@@ -2769,7 +2769,7 @@ class _SummaryCard extends StatelessWidget {
             Expanded(
               child: _SummaryTile(
                 label: 'Expense',
-                value: '−${currencyFormat.format(totalExpense)}',
+                value: '-${currencyFormat.format(totalExpense)}',
                 icon: Icons.arrow_upward,
                 color: Colors.redAccent.shade100,
               ),
