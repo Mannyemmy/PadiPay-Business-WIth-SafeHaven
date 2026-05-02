@@ -159,7 +159,8 @@ class _HomePageState extends State<HomePage> {
       } else if (createdAtRaw is DateTime) {
         createdAt = createdAtRaw;
       } else if (createdAtRaw is String) {
-        createdAt = DateTime.tryParse(createdAtRaw) ??
+        createdAt =
+            DateTime.tryParse(createdAtRaw) ??
             DateTime.fromMillisecondsSinceEpoch(0);
       } else {
         createdAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -358,7 +359,9 @@ class _HomePageState extends State<HomePage> {
           context: context,
           builder: (context) => AlertDialog(
             title: const Text('Update available'),
-            content: const Text('A newer version is available on Google Play. Update now?'),
+            content: const Text(
+              'A newer version is available on Google Play. Update now?',
+            ),
             actions: [
               TextButton(
                 onPressed: () => Navigator.of(context).pop(false),
@@ -397,8 +400,7 @@ class _HomePageState extends State<HomePage> {
   Future<void> _fetchBusinessData() async {
     try {
       final currentUser = FirebaseAuth.instance.currentUser;
-      final currentEmail =
-          (currentUser?.email ?? '').trim().toLowerCase();
+      final currentEmail = (currentUser?.email ?? '').trim().toLowerCase();
       final useSuperAgentMock = currentEmail == 'justefe99@gmail.com';
 
       DocumentSnapshot busSnap = await FirebaseFirestore.instance
@@ -537,138 +539,98 @@ class _HomePageState extends State<HomePage> {
         // the relevant parent/stand info above.
       }
 
+      // REMOVE this line entirely — kybCreation no longer exists:
+      // customerId = data["kybCreation"]["data"]["id"];  ← DELETE
+
+      // REPLACE the business account resolution block with:
       if (busSnap.exists && !earlyStandUser) {
         Map<String, dynamic> data = busSnap.data() as Map<String, dynamic>;
 
         isSuperAgent = data['isSuperAgent'] == true;
         storefrontEnabledLocal = data['storefront']?['enabled'] == true;
         stars = (data['superAgentStars'] ?? 0) is int
-          ? (data['superAgentStars'] ?? 0) as int
-          : int.tryParse((data['superAgentStars'] ?? '0').toString()) ?? 0;
+            ? (data['superAgentStars'] ?? 0) as int
+            : int.tryParse((data['superAgentStars'] ?? '0').toString()) ?? 0;
         availableCommission =
-          (data['superAgentAvailableEarnings'] as num?)?.toDouble() ?? 0.0;
+            (data['superAgentAvailableEarnings'] as num?)?.toDouble() ?? 0.0;
         if (isSuperAgent) {
           monthlyCommission = await _fetchCurrentMonthCommissionsTotal(uid);
         }
 
         kybStatus = data['kycStatus'] ?? '';
-        customerId = data["kybCreation"]["data"]["id"];
         isKybApproved = kybStatus == "APPROVED";
-        showAwaitingDocsBanner =
-            kybStatus == "AWAITING_DOCUMENT" &&
-            (data['requiredDocuments'] is List) &&
-            (data['requiredDocuments'] as List).isNotEmpty;
 
-        if (isKybApproved) {
-          final virtualAccData = getVirtualAccountData(data);
-          businessAccountId = virtualAccData?['id']?.toString();
+        // Use central resolver instead of kybCreation
+        final vaData = await resolveVirtualAccount(uid);
+        businessAccountId = vaData?['id']?.toString();
 
-          // If APPROVED but no virtual account yet → special banner + fallback to personal
-          if (businessAccountId == null) {
+        // Determine if this business has a virtual account at all
+        // (regardless of KYB status — safehavenData.virtualAccount is the source of truth)
+        final bizSafehaven = data['safehavenData'] as Map<String, dynamic>?;
+        final bizVa = bizSafehaven?['virtualAccount'] as Map<String, dynamic>?;
+        final bizVaData = bizVa?['data'] as Map<String, dynamic>?;
+        final hasBizVirtualAccount = bizVaData?['id'] != null;
+
+        if (hasBizVirtualAccount) {
+          // Business has a virtual account — treat as approved regardless of kycStatus
+          isKybApproved = true;
+          businessAccountId = bizVaData!['id'].toString();
+          showCreateBusinessBankAccountBanner = false;
+          showAwaitingDocsBanner = false;
+        } else {
+          showAwaitingDocsBanner =
+              kybStatus == "AWAITING_DOCUMENT" &&
+              (data['requiredDocuments'] is List) &&
+              (data['requiredDocuments'] as List).isNotEmpty;
+          if (isKybApproved && businessAccountId == null) {
             showCreateBusinessBankAccountBanner = true;
           }
         }
 
-        // Prefer utility-resolved account id (this will return stand account when
-        // the auth user is a stand user). Use it to fetch balance early so the
-        // UI can display the correct amount even when KYB checks would otherwise
-        // skip business account logic.
-        try {
-          final acct = await getCurrentAccountIdAndType();
-          final resolvedAccountId = acct['accountId'];
-          if (resolvedAccountId != null) {
-            try {
-              bal = await sudoFetchAccountBalance(resolvedAccountId);
-            } catch (e) {
-              debugPrint('Error fetching balance for resolved account id: $e');
-            }
+        // Fetch balance using resolved account id
+        if (businessAccountId != null) {
+          try {
+            bal = await sudoFetchAccountBalance(businessAccountId!);
+          } catch (e) {
+            debugPrint('Error fetching business balance: $e');
           }
-        } catch (e) {
-          debugPrint('Error resolving account via utils: $e');
         }
-
-        _logStorefrontBannerState(
-          'business-doc-loaded',
-          busDocExists: busSnap.exists,
-          storefrontEnabledValue: storefrontEnabledLocal,
-          businessAccountValue: isBusinessAccount,
-          standUserValue: isLoggedInStandUser,
-          awaitingDocsValue: showAwaitingDocsBanner,
-          createAccountBannerValue: showCreateBusinessBankAccountBanner,
-          tagValue: userTag,
-        );
       }
 
       // Decide which account to use
+      // Replace this entire block:
       if (busSnap.exists && isKybApproved && businessAccountId != null) {
-        // FULL BUSINESS MODE
         Map<String, dynamic> data = busSnap.data() as Map<String, dynamic>;
 
-        // name parsing (unchanged)
-        first = data['firstName'] ?? first;
-        last = data['lastName'] ?? last;
-        busName = data['businessName'] ?? busName;
-        busPhone = data['businessPhone'] ?? busPhone;
-        Map<String, dynamic>? kyb =
-            data['kybCreation'] as Map<String, dynamic>?;
-        if (kyb != null) {
-          Map<String, dynamic>? dataMap = kyb['data'] as Map<String, dynamic>?;
-          if (dataMap != null) {
-            Map<String, dynamic>? attributes =
-                dataMap['attributes'] as Map<String, dynamic>?;
-            if (attributes != null) {
-              // Business name from detail
-              Map<String, dynamic>? detail =
-                  attributes['detail'] as Map<String, dynamic>?;
-              if (detail != null) {
-                busName = detail['businessName'] ?? busName;
-              }
+        // Get name from business_data (new structure) or legacy fields
+        final businessDataMap = data['business_data'] as Map<String, dynamic>?;
+        busName = businessDataMap?['name'] ?? data['businessName'] ?? busName;
 
-              // Director/officer name (first & last)
-              List<dynamic>? officers =
-                  attributes['officers'] as List<dynamic>?;
-              if (officers != null && officers.isNotEmpty) {
-                Map<String, dynamic>? officer =
-                    officers[0] as Map<String, dynamic>?;
-                if (officer != null) {
-                  Map<String, dynamic>? fullName =
-                      officer['fullName'] as Map<String, dynamic>?;
-                  if (fullName != null) {
-                    first = fullName['firstName'] ?? first;
-                    last = fullName['lastName'] ?? last;
-                  }
-                }
-                // persist parent business name for UI use
-                parentBusinessName = busName;
-              }
-            }
-          }
-        }
+        // Get account number from safehavenData.virtualAccount
+        final safehavenData = data['safehavenData'] as Map<String, dynamic>?;
+        final va = safehavenData?['virtualAccount'] as Map<String, dynamic>?;
+        final vaData = va?['data'] as Map<String, dynamic>?;
+        final attrs = vaData?['attributes'] as Map<String, dynamic>?;
+        busPhone = attrs?['accountNumber']?.toString() ?? busPhone;
 
-        final virtualAccData = getVirtualAccountData(data);
-        String? accNum =
-          virtualAccData?['attributes']?['accountNumber']?.toString();
-        // If account number missing, attempt to fetch authoritative data and update Firestore
-        if (accNum == null || accNum.toString().isEmpty) {
-          await _fetchAndUpdateVirtualAccount(
-            businessAccountId,
-            FirebaseFirestore.instance.collection('businesses').doc(uid),
-          );
-          final refreshed = await FirebaseFirestore.instance
-              .collection('businesses')
+        // Get user name from users collection
+        try {
+          final userDoc = await FirebaseFirestore.instance
+              .collection('users')
               .doc(uid)
               .get();
-            accNum = getVirtualAccountData(refreshed.data())?['attributes']?['accountNumber']
-              ?.toString();
+          if (userDoc.exists) {
+            final ud = userDoc.data()!;
+            first = ud['firstName']?.toString() ?? first;
+            last = ud['lastName']?.toString() ?? last;
+          }
+        } catch (e) {
+          debugPrint('Error fetching user names: $e');
         }
-        busPhone = accNum ?? busPhone;
 
-        bal = await sudoFetchAccountBalance(businessAccountId);
-
+        bal = await sudoFetchAccountBalance(businessAccountId!);
         isBusinessAccount = true;
-        setState(() {
-          userTag = busName.replaceAll(' ', '_');
-        });
+        setState(() => userTag = busName.replaceAll(' ', '_'));
       } else if (!earlyStandUser) {
         // Check if auth user exists in regular `users` collection, otherwise
         // fall back to `standUsers` (some accounts may live there).
@@ -765,10 +727,10 @@ class _HomePageState extends State<HomePage> {
             final personalVirtualAcc = getVirtualAccountData(data);
             if (personalVirtualAcc != null) {
               String? accNum =
-                personalVirtualAcc['attributes']?['accountNumber']?.toString();
+                  personalVirtualAcc['attributes']?['accountNumber']
+                      ?.toString();
               // If missing, attempt to fetch and update
-              final personalAccountId =
-                personalVirtualAcc['id']?.toString();
+              final personalAccountId = personalVirtualAcc['id']?.toString();
               if ((accNum == null || accNum.toString().isEmpty) &&
                   personalAccountId != null) {
                 await _fetchAndUpdateVirtualAccount(
@@ -779,14 +741,14 @@ class _HomePageState extends State<HomePage> {
                     .collection('users')
                     .doc(uid)
                     .get();
-                accNum = getVirtualAccountData(refreshed.data())?['attributes']?['accountNumber']
-                  ?.toString();
+                accNum = getVirtualAccountData(
+                  refreshed.data(),
+                )?['attributes']?['accountNumber']?.toString();
               }
 
               busPhone = accNum ?? 'N/A';
-                tier = int.tryParse(getWalletTier(data) ?? '0') ?? 0;
-                String? personalAccountId2 =
-                  personalVirtualAcc['id']?.toString();
+              tier = int.tryParse(getWalletTier(data) ?? '0') ?? 0;
+              String? personalAccountId2 = personalVirtualAcc['id']?.toString();
               if (personalAccountId2 != null) {
                 bal = await sudoFetchAccountBalance(personalAccountId2);
               }
@@ -964,14 +926,14 @@ class _HomePageState extends State<HomePage> {
         isSuperAgentUser = useSuperAgentMock ? true : isSuperAgent;
         superAgentStars = useSuperAgentMock ? 4 : stars;
         superAgentCommissionCurrentMonth = useSuperAgentMock
-          ? 32500
-          : monthlyCommission;
+            ? 32500
+            : monthlyCommission;
         superAgentCommissionAvailable = useSuperAgentMock
             ? 86500
             : availableCommission;
         storefrontEnabled = storefrontEnabledLocal;
         showStorefrontActivationBanner =
-          hasStorefrontTag &&
+            hasStorefrontTag &&
             !isLoggedInStandUser &&
             !showAwaitingDocsBanner &&
             !showCreateBusinessBankAccountBanner &&
@@ -1052,7 +1014,9 @@ class _HomePageState extends State<HomePage> {
       }
 
       if (accountNumber == null && bankName == null) {
-        print('sudoFetchAccountNumber: no accountNumber or bank found in response');
+        print(
+          'sudoFetchAccountNumber: no accountNumber or bank found in response',
+        );
         return;
       }
 
@@ -1889,7 +1853,7 @@ class _HomePageState extends State<HomePage> {
                                       ],
                                     ),
                                     if (isSuperAgentUser) ...[
-                                      SizedBox(height:30),
+                                      SizedBox(height: 30),
                                       InkWell(
                                         onTap: () {
                                           navigateTo(
@@ -1912,11 +1876,14 @@ class _HomePageState extends State<HomePage> {
                                               begin: Alignment.topLeft,
                                               end: Alignment.bottomRight,
                                             ),
-                                            borderRadius:
-                                                BorderRadius.circular(12),
+                                            borderRadius: BorderRadius.circular(
+                                              12,
+                                            ),
                                             boxShadow: [
                                               BoxShadow(
-                                                color: Colors.black.withValues(alpha: 0.12),
+                                                color: Colors.black.withValues(
+                                                  alpha: 0.12,
+                                                ),
                                                 blurRadius: 12,
                                                 offset: Offset(0, 4),
                                               ),
@@ -1925,24 +1892,33 @@ class _HomePageState extends State<HomePage> {
                                           child: Row(
                                             children: [
                                               Icon(
-                                                Icons.workspace_premium_outlined,
+                                                Icons
+                                                    .workspace_premium_outlined,
                                                 color: Colors.amber.shade200,
                                                 size: 18,
                                               ),
                                               SizedBox(width: 6),
                                               Column(
-                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
                                                 children: [
                                                   Row(
                                                     children: List.generate(
                                                       5,
                                                       (index) => Padding(
-                                                        padding: const EdgeInsets.only(right: 2),
+                                                        padding:
+                                                            const EdgeInsets.only(
+                                                              right: 2,
+                                                            ),
                                                         child: Icon(
-                                                          index < superAgentStars
+                                                          index <
+                                                                  superAgentStars
                                                               ? Icons.star
-                                                              : Icons.star_outline,
-                                                          color: Colors.amber.shade200,
+                                                              : Icons
+                                                                    .star_outline,
+                                                          color: Colors
+                                                              .amber
+                                                              .shade200,
                                                           size: 14,
                                                         ),
                                                       ),
@@ -1950,11 +1926,14 @@ class _HomePageState extends State<HomePage> {
                                                   ),
                                                   SizedBox(height: 2),
                                                   Text(
-                                                    _superAgentTierName(superAgentStars),
+                                                    _superAgentTierName(
+                                                      superAgentStars,
+                                                    ),
                                                     style: TextStyle(
                                                       color: Colors.white70,
                                                       fontSize: 10,
-                                                      fontWeight: FontWeight.w600,
+                                                      fontWeight:
+                                                          FontWeight.w600,
                                                     ),
                                                   ),
                                                 ],
@@ -2024,14 +2003,16 @@ class _HomePageState extends State<HomePage> {
                                             decoration: BoxDecoration(
                                               borderRadius:
                                                   BorderRadius.circular(12),
-                                            color: Colors.green.withValues(alpha: 0.9),),
+                                              color: Colors.green.withValues(
+                                                alpha: 0.9,
+                                              ),
+                                            ),
                                             child: Row(
                                               children: [
                                                 Icon(
                                                   Icons.savings_outlined,
-                                                  color: Colors.white.withValues(
-                                                    alpha: 0.9,
-                                                  ),
+                                                  color: Colors.white
+                                                      .withValues(alpha: 0.9),
                                                   size: 17,
                                                 ),
                                                 SizedBox(width: 8),

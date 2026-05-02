@@ -1,4 +1,3 @@
-
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -51,36 +50,72 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
 
   Future<void> _loadFlags() async {
     final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
+    if (user == null) {
+      return;
+    }
 
     final doc = await FirebaseFirestore.instance
         .collection('businesses')
         .doc(user.uid)
         .get();
 
-    if (!doc.exists) return;
+    // Don't bail out — business doc may not exist yet, but BVN still needs checking
+    final data = doc.exists ? doc.data()! : <String, dynamic>{};
+    if (data['safehavenData']['virtualAccount']!=null) {
+      currentKycStatus = "APPROVED";
+    }
 
-    final data = doc.data()!;
-
-    // Load user verification status (qoreIdData.verification) from users collection
     final userDoc = await FirebaseFirestore.instance
         .collection('users')
         .doc(user.uid)
         .get();
-    final userData = userDoc.exists ? (userDoc.data() ?? <String, dynamic>{}) : <String, dynamic>{};
-    final qoreData = userData['qoreIdData'] as Map<String, dynamic>? ?? <String, dynamic>{};
-    final verification = qoreData['verification'] as Map<String, dynamic>? ?? <String, dynamic>{};
-    final metadata = verification['metadata'] as Map<String, dynamic>? ?? <String, dynamic>{};
 
-    final reusableBvn =
+    if (!userDoc.exists) {
+      return;
+    }
+
+    final userData = userDoc.data() ?? <String, dynamic>{};
+    final qoreData =
+        userData['qoreIdData'] as Map<String, dynamic>? ?? <String, dynamic>{};
+
+    final bvnVerif = qoreData['bvnVerificationNoFace'] as Map<String, dynamic>?;
+
+    final bool bvnVerifiedDirect = bvnVerif?['verified'] == true;
+
+    final bool bvnVerifiedFieldExists =
+        bvnVerif != null && bvnVerif.containsKey('verified');
+
+    final bool bvnExplicitlyFalse =
+        bvnVerifiedFieldExists && bvnVerif!['verified'] == false;
+
+    final verification =
+        qoreData['verification'] as Map<String, dynamic>? ??
+        <String, dynamic>{};
+    final metadata =
+        verification['metadata'] as Map<String, dynamic>? ??
+        <String, dynamic>{};
+
+    final hasBvn =
         (userData['bvn']?.toString().trim().isNotEmpty == true) ||
         (metadata['idNumber']?.toString().trim().isNotEmpty == true) ||
         (metadata['bvn']?.toString().trim().isNotEmpty == true);
-    final reusableIdentityData =
-        getWalletContainer(userData)?['customerCreation'] != null;
-    final isQoreMatch = metadata['match'] == true;
-    final isVerificationSubmitted = verification['submitted'] == true;
-    final isIdentityVerified = isQoreMatch || reusableBvn || reusableIdentityData;
+
+    final qoreVerified =
+        verification['verified'] == true || metadata['match'] == true;
+
+    final userTier = (userData['sudoData']?['tier'] as num?)?.toInt() ?? 0;
+
+    final hasCustomerCreation =
+        (userData['sudoData'] as Map<String, dynamic>?)?['customerCreation'] !=
+        null;
+
+    final bool fallbackWouldFire =
+        !bvnVerifiedFieldExists &&
+        hasBvn &&
+        (qoreVerified || userTier >= 1 || hasCustomerCreation);
+
+    final bool effectiveVerified = bvnVerifiedDirect || fallbackWouldFire;
+    final bool effectiveFailed = bvnExplicitlyFalse;
 
     setState(() {
       contactFixed = data['contact_fixed'] ?? false;
@@ -88,31 +123,20 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
       repFixed = data['rep_fixed'] ?? false;
       docsFixed = data['docs_fixed'] ?? false;
 
-      // Identity verification flags
-      idSubmitted = isVerificationSubmitted || isIdentityVerified;
-      // Accept existing user-app BVN/identity data as reusable verification.
-      idVerified = isIdentityVerified;
-      // If metadata.match exists and is false, mark it as a failed verification
-      idFailed = metadata.containsKey('match') && metadata['match'] == false && !isIdentityVerified;
+      idVerified = effectiveVerified;
+      idSubmitted = effectiveVerified;
+      idFailed = effectiveFailed;
 
-      // SAFE CAST: if requiredDocuments is null, not a list, or a map → treat as empty
       final requiredDocsRaw = data['requiredDocuments'];
       final List<dynamic> requiredDocsList = requiredDocsRaw is List
           ? requiredDocsRaw
           : [];
       showDocs = requiredDocsList.isNotEmpty;
 
-      currentKycStatus = data['kycStatus'] as String?;
       kybVerificationExists = data['kybVerification'] != null;
     });
-    // navigateTo(context, BusinessUpgradeManager(),type:NavigationType.replace);
   }
 
-  bool get infoComplete => contactFixed && businessFixed && repFixed && idVerified;
-
-  // ──────────────────────────────────────────────────────────────
-  //  Your original methods – copied exactly from your working code
-  // ──────────────────────────────────────────────────────────────
   Future<List<Map<String, dynamic>>> _buildOfficersList(
     Map<String, dynamic> rep,
     Map<String, dynamic> contact,
@@ -259,9 +283,9 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
         'Business details submitted. Waiting for document requirements...',
         Colors.green,
       );
-      navigateTo(context, HomePage(),type: NavigationType.clearStack);
+      navigateTo(context, HomePage(), type: NavigationType.clearStack);
     } catch (e) {
-      print( e);
+      print(e);
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text('Error: $e')));
@@ -274,7 +298,6 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
   // ──────────────────────────────────────────────────────────────
   //  Submit documents using the sudoId saved by webhook
   // ──────────────────────────────────────────────────────────────── ───────────────────────
-  
 
   Future<void> _submitDocuments() async {
     setState(() => isLoading = true);
@@ -323,45 +346,61 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
           callData['fileName'] = fileData['name'];
         }
 
-        await FirebaseFunctions.instance.httpsCallable('uploadDocument').call(callData);
+        await FirebaseFunctions.instance
+            .httpsCallable('uploadDocument')
+            .call(callData);
 
         uploadedCount++;
       }
 
       // Only mark as uploaded if we actually uploaded something
       if (uploadedCount > 0) {
-        await fsDoc.reference.set({'kybDocumentsUploaded': true}, SetOptions(merge: true));
+        await fsDoc.reference.set({
+          'kybDocumentsUploaded': true,
+        }, SetOptions(merge: true));
       }
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-        backgroundColor: Colors.green,
-        content: Text(uploadedCount == 0
-            ? "All documents already approved!"
-            : "Successfully uploaded all document(s)"),
-      ));
+          backgroundColor: Colors.green,
+          content: Text(
+            uploadedCount == 0
+                ? "All documents already approved!"
+                : "Successfully uploaded all document(s)",
+          ),
+        ),
+      );
 
       navigateTo(context, HomePage(), type: NavigationType.clearStack);
     } catch (e) {
       print(e);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Upload failed: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Upload failed: $e')));
     } finally {
       setState(() => isLoading = false);
     }
   }
-   Future<Map<String, dynamic>> _createBusinessUser(
+
+  Future<Map<String, dynamic>> _createBusinessUser(
     Map<String, dynamic> data,
   ) async {
-    final res = await callCloudFunctionLogged('sudoCreateBusinessUser', source: 'business_app', payload: data);
+    final res = await callCloudFunctionLogged(
+      'sudoCreateBusinessUser',
+      source: 'business_app',
+      payload: data,
+    );
     return res.data;
   }
 
   Future<Map<String, dynamic>> _verifyBusinessCustomer(
     String customerId,
   ) async {
-    final res = await callCloudFunctionLogged('sudoVerifyBusinessCustomer', source: 'business_app', payload: {'customerId': customerId});
+    final res = await callCloudFunctionLogged(
+      'sudoVerifyBusinessCustomer',
+      source: 'business_app',
+      payload: {'customerId': customerId},
+    );
     return res.data;
   }
 
@@ -412,8 +451,6 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
                     ),
 
                   // Show banner asking user to complete BVN if not verified
-                 
-
                   if (currentKycStatus == "AWAITING_DOCUMENT")
                     Center(
                       child: Padding(
@@ -429,7 +466,7 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
                     ),
 
                   const SizedBox(height: 40),
- // ==================== CONTACT ====================
+                  // ==================== CONTACT ====================
                   Row(
                     children: [
                       Container(
@@ -468,11 +505,21 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
                           decoration: BoxDecoration(
                             color: idVerified
                                 ? Colors.green[600]
-                                : (idFailed ? Colors.red[600] : (idSubmitted ? Colors.orange[700] : primaryColor)),
+                                : (idFailed
+                                      ? Colors.red[600]
+                                      : (idSubmitted
+                                            ? Colors.orange[700]
+                                            : primaryColor)),
                             borderRadius: BorderRadius.circular(25),
                           ),
                           child: Text(
-                            idVerified ? "Fixed" : (idFailed ? "Failed, Tap to Retry" : (idSubmitted ? "Submitted" : "Fix Now")),
+                            idVerified
+                                ? "Fixed"
+                                : (idFailed
+                                      ? "Failed, Tap to Retry"
+                                      : (idSubmitted
+                                            ? "Submitted"
+                                            : "Fix Now")),
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 12,
@@ -483,69 +530,75 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
                     ],
                   ),
 
-                  const SizedBox(height: 40),
+                  // const SizedBox(height: 40),
 
-                  
                   // ==================== CONTACT ====================
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: primaryColor.withOpacity(0.1),
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(
-                          Icons.file_copy,
-                          size: 16,
-                          color: primaryColor,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        "Contact & Address Information",
-                        style: TextStyle(
-                          color: Colors.grey.shade500,
-                          fontSize: 12,
-                        ),
-                      ),
-                      const Spacer(),
-                      GestureDetector(
-                        onTap: () {
-                          if (!idVerified) {
-                            showSnackBar(context, 'Please complete BVN verification first', Colors.orange);
-                            return;
-                          }
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => ContactAndAddress(),
-                            ),
-                          ).then((_) => _loadFlags());
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 13,
-                            vertical: 8,
-                          ),
-                          decoration: BoxDecoration(
-                            color: contactFixed
-                                ? Colors.green[600]
-                                : (idVerified ? primaryColor : Colors.grey[400]),
-                            borderRadius: BorderRadius.circular(25),
-                          ),
-                          child: Text(
-                            contactFixed ? "Fixed" : (idVerified ? "Fix Now" : "Fix Previous"),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-
+                  // Row(
+                  //   children: [
+                  //     Container(
+                  //       padding: const EdgeInsets.all(12),
+                  //       decoration: BoxDecoration(
+                  //         color: primaryColor.withOpacity(0.1),
+                  //         shape: BoxShape.circle,
+                  //       ),
+                  //       child: Icon(
+                  //         Icons.file_copy,
+                  //         size: 16,
+                  //         color: primaryColor,
+                  //       ),
+                  //     ),
+                  //     const SizedBox(width: 10),
+                  //     Text(
+                  //       "Contact & Address Information",
+                  //       style: TextStyle(
+                  //         color: Colors.grey.shade500,
+                  //         fontSize: 12,
+                  //       ),
+                  //     ),
+                  //     const Spacer(),
+                  //     GestureDetector(
+                  //       onTap: () {
+                  //         if (!idVerified) {
+                  //           showSnackBar(
+                  //             context,
+                  //             'Please complete BVN verification first',
+                  //             Colors.orange,
+                  //           );
+                  //           return;
+                  //         }
+                  //         Navigator.push(
+                  //           context,
+                  //           MaterialPageRoute(
+                  //             builder: (_) => ContactAndAddress(),
+                  //           ),
+                  //         ).then((_) => _loadFlags());
+                  //       },
+                  //       child: Container(
+                  //         padding: const EdgeInsets.symmetric(
+                  //           horizontal: 13,
+                  //           vertical: 8,
+                  //         ),
+                  //         decoration: BoxDecoration(
+                  //           color: contactFixed
+                  //               ? Colors.green[600]
+                  //               : (idVerified
+                  //                     ? primaryColor
+                  //                     : Colors.grey[400]),
+                  //           borderRadius: BorderRadius.circular(25),
+                  //         ),
+                  //         child: Text(
+                  //           contactFixed
+                  //               ? "Fixed"
+                  //               : (idVerified ? "Fix Now" : "Fix Previous"),
+                  //           style: const TextStyle(
+                  //             color: Colors.white,
+                  //             fontSize: 12,
+                  //           ),
+                  //         ),
+                  //       ),
+                  //     ),
+                  //   ],
+                  // ),
                   const SizedBox(height: 40),
 
                   // ==================== BUSINESS INFO ====================
@@ -575,7 +628,11 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
                       GestureDetector(
                         onTap: () {
                           if (!idVerified) {
-                            showSnackBar(context, 'Please complete BVN verification first', Colors.orange);
+                            showSnackBar(
+                              context,
+                              'Please complete BVN verification first',
+                              Colors.orange,
+                            );
                             return;
                           }
                           Navigator.push(
@@ -593,11 +650,15 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
                           decoration: BoxDecoration(
                             color: businessFixed
                                 ? Colors.green[600]
-                                : (idVerified ? primaryColor : Colors.grey[400]),
+                                : (idVerified
+                                      ? primaryColor
+                                      : Colors.grey[400]),
                             borderRadius: BorderRadius.circular(25),
                           ),
                           child: Text(
-                            businessFixed ? "Fixed" : (idVerified ? "Fix Now" : "Fix Previous"),
+                            businessFixed
+                                ? "Fixed"
+                                : (idVerified ? "Fix Now" : "Fix Previous"),
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 12,
@@ -608,164 +669,142 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
                     ],
                   ),
 
-                  const SizedBox(height: 40),
+                  // const SizedBox(height: 40),
 
                   // ==================== DIRECTORS ====================
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: primaryColor.withOpacity(0.1),
-                          shape: BoxShape.circle,
-                        ),
-                        child: Icon(
-                          Icons.file_copy,
-                          size: 16,
-                          color: primaryColor,
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        "Business Director Summary",
-                        style: TextStyle(
-                          color: Colors.grey.shade500,
-                          fontSize: 12,
-                        ),
-                      ),
-                      const Spacer(),
-                      GestureDetector(
-                        onTap: () {
-                          if (!idVerified) {
-                            showSnackBar(context, 'Please complete BVN verification first', Colors.orange);
-                            return;
-                          }
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(builder: (_) => RepDetails()),
-                          ).then((_) => _loadFlags());
-                        },
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 13,
-                            vertical: 8,
-                          ),
-                          decoration: BoxDecoration(
-                            color: repFixed ? Colors.green[600] : (idVerified ? primaryColor : Colors.grey[400]),
-                            borderRadius: BorderRadius.circular(25),
-                          ),
-                          child: Text(
-                            repFixed ? "Fixed" : (idVerified ? "Fix Now" : "Fix Previous"),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
+                  // Row(
+                  //   children: [
+                  //     Container(
+                  //       padding: const EdgeInsets.all(12),
+                  //       decoration: BoxDecoration(
+                  //         color: primaryColor.withOpacity(0.1),
+                  //         shape: BoxShape.circle,
+                  //       ),
+                  //       child: Icon(
+                  //         Icons.file_copy,
+                  //         size: 16,
+                  //         color: primaryColor,
+                  //       ),
+                  //     ),
+                  //     // const SizedBox(width: 10),
+                  //     Text(
+                  //       "Business Director Summary",
+                  //       style: TextStyle(
+                  //         color: Colors.grey.shade500,
+                  //         fontSize: 12,
+                  //       ),
+                  //     ),
+                  //     const Spacer(),
+                  //     GestureDetector(
+                  //       onTap: () {
+                  //         if (!idVerified) {
+                  //           showSnackBar(
+                  //             context,
+                  //             'Please complete BVN verification first',
+                  //             Colors.orange,
+                  //           );
+                  //           return;
+                  //         }
+                  //         Navigator.push(
+                  //           context,
+                  //           MaterialPageRoute(builder: (_) => RepDetails()),
+                  //         ).then((_) => _loadFlags());
+                  //       },
+                  //       child: Container(
+                  //         padding: const EdgeInsets.symmetric(
+                  //           horizontal: 13,
+                  //           vertical: 8,
+                  //         ),
+                  //         decoration: BoxDecoration(
+                  //           color: repFixed
+                  //               ? Colors.green[600]
+                  //               : (idVerified
+                  //                     ? primaryColor
+                  //                     : Colors.grey[400]),
+                  //           borderRadius: BorderRadius.circular(25),
+                  //         ),
+                  //         child: Text(
+                  //           repFixed
+                  //               ? "Fixed"
+                  //               : (idVerified ? "Fix Now" : "Fix Previous"),
+                  //           style: const TextStyle(
+                  //             color: Colors.white,
+                  //             fontSize: 12,
+                  //           ),
+                  //         ),
+                  //       ),
+                  //     ),
+                  //   ],
+                  // ),
 
                   // ==================== DOCUMENTS (only when Sudo tells us) ====================
-                  if (currentKycStatus == "AWAITING_DOCUMENT") ...[
-                    const SizedBox(height: 40),
-                    Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: primaryColor.withOpacity(0.1),
-                            shape: BoxShape.circle,
-                          ),
-                          child: Icon(
-                            Icons.file_copy,
-                            size: 16,
-                            color: primaryColor,
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Text(
-                          "Official Business Documentation",
-                          style: TextStyle(
-                            color: Colors.grey.shade500,
-                            fontSize: 12,
-                          ),
-                        ),
-                        const Spacer(),
-                        GestureDetector(
-                          onTap: () {
-                            if (!idVerified) {
-                              showSnackBar(context, 'Please complete BVN verification first', Colors.orange);
-                              return;
-                            }
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(builder: (_) => BusinessDocs()),
-                            ).then((_) => _loadFlags());
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 13,
-                              vertical: 8,
-                            ),
-                            decoration: BoxDecoration(
-                              color: docsFixed
-                                  ? Colors.green[600]
-                                  : (idVerified ? primaryColor : Colors.grey[400]),
-                              borderRadius: BorderRadius.circular(25),
-                            ),
-                            child: Text(
-                              docsFixed ? "Fixed" : (idVerified ? "Fix Now" : "Fix Previous"),
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-
-                  const SizedBox(height: 60),
-
-                  // ==================== SUBMIT BUTTON ====================
-                  if ((!kybVerificationExists && infoComplete) ||
-                      (currentKycStatus == "AWAITING_DOCUMENT" &&
-                          showDocs &&
-                          docsFixed))
-                    GestureDetector(
-                      onTap: isLoading
-                          ? null
-                          : (kybVerificationExists
-                                ? _submitDocuments
-                                : _submitDetails),
-                      child: Container(
-                        width: double.infinity,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        decoration: BoxDecoration(
-                          color: primaryColor,
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Center(
-                          child: isLoading
-                              ? const CircularProgressIndicator(
-                                  color: Colors.white,
-                                )
-                              : Text(
-                                  kybVerificationExists
-                                      ? "Submit Documents"
-                                      : "Submit Business Details",
-                                  style: GoogleFonts.inter(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 16,
-                                  ),
-                                ),
-                        ),
-                      ),
-                    ),
-
+                  // if (currentKycStatus == "AWAITING_DOCUMENT") ...[
+                  //   const SizedBox(height: 40),
+                  //   Row(
+                  //     children: [
+                  //       Container(
+                  //         padding: const EdgeInsets.all(12),
+                  //         decoration: BoxDecoration(
+                  //           color: primaryColor.withOpacity(0.1),
+                  //           shape: BoxShape.circle,
+                  //         ),
+                  //         child: Icon(
+                  //           Icons.file_copy,
+                  //           size: 16,
+                  //           color: primaryColor,
+                  //         ),
+                  //       ),
+                  //       const SizedBox(width: 10),
+                  //       Text(
+                  //         "Official Business Documentation",
+                  //         style: TextStyle(
+                  //           color: Colors.grey.shade500,
+                  //           fontSize: 12,
+                  //         ),
+                  //       ),
+                  //       const Spacer(),
+                  //       GestureDetector(
+                  //         onTap: () {
+                  //           if (!idVerified) {
+                  //             showSnackBar(
+                  //               context,
+                  //               'Please complete BVN verification first',
+                  //               Colors.orange,
+                  //             );
+                  //             return;
+                  //           }
+                  //           Navigator.push(
+                  //             context,
+                  //             MaterialPageRoute(builder: (_) => BusinessDocs()),
+                  //           ).then((_) => _loadFlags());
+                  //         },
+                  //         child: Container(
+                  //           padding: const EdgeInsets.symmetric(
+                  //             horizontal: 13,
+                  //             vertical: 8,
+                  //           ),
+                  //           decoration: BoxDecoration(
+                  //             color: docsFixed
+                  //                 ? Colors.green[600]
+                  //                 : (idVerified
+                  //                       ? primaryColor
+                  //                       : Colors.grey[400]),
+                  //             borderRadius: BorderRadius.circular(25),
+                  //           ),
+                  //           child: Text(
+                  //             docsFixed
+                  //                 ? "Fixed"
+                  //                 : (idVerified ? "Fix Now" : "Fix Previous"),
+                  //             style: const TextStyle(
+                  //               color: Colors.white,
+                  //               fontSize: 12,
+                  //             ),
+                  //           ),
+                  //         ),
+                  //       ),
+                  //     ],
+                  //   ),
+                  // ],
                   const SizedBox(height: 80),
                 ],
               ),

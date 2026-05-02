@@ -1276,7 +1276,7 @@ Future<double> sudoFetchAccountBalance(String accountId) async {
   if (accountId.isEmpty) return 0.0;
   try {
     final callable = FirebaseFunctions.instance.httpsCallable(
-      'sudoFetchAccountBalance',
+      'safehavenFetchAccountBalance',
     );
     final result = await callable.call({'accountId': accountId});
     double balance = result.data['data']['availableBalance']?.toDouble() ?? 0.0;
@@ -1698,17 +1698,47 @@ Future<String> generateUniqueReferralCode({
   return prefix +
       DateTime.now().millisecondsSinceEpoch.toString().substring(0, 6);
 }
+/// Fetches the virtual account data for the current user.
+/// First checks businesses/{uid}/safehavenData.virtualAccount,
+/// then falls back to users/{uid}/safehavenData.virtualAccount.
+/// Returns the inner `data` map (with id, attributes, etc.) or null.
+Future<Map<String, dynamic>?> resolveVirtualAccount(String uid) async {
+  // Try businesses collection first
+  final bizDoc = await FirebaseFirestore.instance
+      .collection('businesses')
+      .doc(uid)
+      .get();
+  if (bizDoc.exists) {
+    final bizData = bizDoc.data() ?? {};
+    final safehavenData = bizData['safehavenData'] as Map<String, dynamic>?;
+    final va = safehavenData?['virtualAccount'] as Map<String, dynamic>?;
+    final inner = va?['data'] as Map<String, dynamic>?;
+    if (inner != null && inner['id'] != null) {
+      return inner;
+    }
+  }
 
-Future<void> _showCustomMissingDataBottomSheet(
-  BuildContext context,
-  Map<String, String> missingFields,
-) async {
-  await showModalBottomSheet<void>(
-    context: context,
-    isDismissible: false,
-    isScrollControlled: true,
-    backgroundColor: Colors.transparent,
-    builder: (BuildContext bottomSheetContext) =>
-        MissingDataBottomSheet(missingFields: missingFields),
-  );
+  // Fall back to users collection
+  final userDoc = await FirebaseFirestore.instance
+      .collection('users')
+      .doc(uid)
+      .get();
+  if (userDoc.exists) {
+    final userData = userDoc.data() ?? {};
+    final safehavenData = userData['safehavenData'] as Map<String, dynamic>?;
+    final va = safehavenData?['virtualAccount'] as Map<String, dynamic>?;
+    final inner = va?['data'] as Map<String, dynamic>?;
+    if (inner != null && inner['id'] != null) {
+      return inner;
+    }
+    // Also check sudoData for legacy accounts
+    final sudoData = userData['sudoData'] as Map<String, dynamic>?;
+    final sudoVa = sudoData?['virtualAccount'] as Map<String, dynamic>?;
+    final sudoInner = sudoVa?['data'] as Map<String, dynamic>?;
+    if (sudoInner != null && sudoInner['id'] != null) {
+      return sudoInner;
+    }
+  }
+
+  return null;
 }
