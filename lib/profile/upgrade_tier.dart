@@ -488,31 +488,32 @@ class _UpgradeTierState extends State<UpgradeTier> {
 
   // Fix _onBvnChanged to respect prereqs:
   void _onBvnChanged(String val) {
-  _bvnCheckTimer?.cancel();
-  _bvnVerifyTimer?.cancel();
+    _bvnCheckTimer?.cancel();
+    _bvnVerifyTimer?.cancel();
 
-  _bvnCheckTimer = Timer(const Duration(milliseconds: 500), () {
-    _checkBvnConflict(val);
-  });
-
-  final bool prereqsMet =
-      _isBvnTierFlow &&
-      _firstNameController.text.isNotEmpty &&
-      _lastNameController.text.isNotEmpty &&
-      _dobController.text.isNotEmpty &&
-      selectedGender != null &&
-      _isUnder18() != true;
-
-  if (val.length == 11 && prereqsMet) {
-    _bvnVerifyTimer = Timer(const Duration(milliseconds: 800), _verifyBvn);
-  } else if (_isBvnTierFlow) {
-    setState(() {
-      _bvnVerified = null;
-      _bvnVerifyStatus = null;
-      _bvnFieldMatches = null;
+    _bvnCheckTimer = Timer(const Duration(milliseconds: 500), () {
+      _checkBvnConflict(val);
     });
+
+    final bool prereqsMet =
+        _isBvnTierFlow &&
+        _firstNameController.text.isNotEmpty &&
+        _lastNameController.text.isNotEmpty &&
+        _dobController.text.isNotEmpty &&
+        selectedGender != null &&
+        _isUnder18() != true;
+
+    if (val.length == 11 && prereqsMet) {
+      _bvnVerifyTimer = Timer(const Duration(milliseconds: 800), _verifyBvn);
+    } else if (_isBvnTierFlow) {
+      setState(() {
+        _bvnVerified = null;
+        _bvnVerifyStatus = null;
+        _bvnFieldMatches = null;
+      });
+    }
   }
-}
+
   // ------------------------------------------------------------
   //   Firestore listener (restore verified state, prefill)
   // ------------------------------------------------------------
@@ -695,11 +696,102 @@ class _UpgradeTierState extends State<UpgradeTier> {
     return null;
   }
 
-  Future<void> _submit() async {
-    if (!_isBvnTierFlow && (_bvnVerified != true)) {
-      showToast('Please verify your BVN first', Colors.red);
-      return;
+  /// Add this method to the class
+  Future<String?> _runIdentityVerificationFlow({
+    required String bvn,
+    required FirebaseFunctions functions,
+  }) async {
+    final uid = FirebaseAuth.instance.currentUser!.uid;
+
+    // Step 1: Check if already verified from a previous webhook
+    final existingSetup = await FirebaseFirestore.instance
+        .collection('safehavenUserSetup')
+        .doc(uid)
+        .get();
+    final existingData = existingSetup.data();
+    final existingStatus = existingData?['identityCheckStatus']?.toString();
+    final existingId = existingData?['identityId']?.toString();
+    if (existingStatus == 'SUCCESS' &&
+        existingId != null &&
+        existingId.isNotEmpty) {
+      print('Identity already verified via webhook. identityId: $existingId');
+      return existingId;
     }
+
+    // Step 2: Initiate — triggers SafeHaven to send OTP to BVN phone
+    final HttpsCallable initiateFunc = functions.httpsCallable(
+      'safehavenInitiateIdentityVerification',
+    );
+    await initiateFunc.call({'type': 'BVN', 'number': bvn});
+
+    // Step 3: Show OTP sheet with no gap — queue sheet before hiding loader
+    if (!mounted) throw Exception('Widget unmounted after initiate');
+
+    String? otp;
+    final otpFuture = Future<String?>.microtask(
+      () => _showIdentityOtpBottomSheet(),
+    );
+
+    // Hide loading indicator — sheet is already queued
+    setState(() => _isLoading = false);
+    otp = await otpFuture;
+
+    if (otp == null || otp.isEmpty) {
+      throw Exception('Identity verification cancelled: OTP not provided');
+    }
+
+    // Step 4: Re-show loading and poll for webhook SUCCESS
+    if (mounted) setState(() => _isLoading = true);
+
+    // Step 5: Poll safehavenUserSetup for webhook-confirmed SUCCESS
+    // The webhook fires ~1-3s after initiate. By the time the user has
+    // typed their OTP (10-30s), the webhook has almost certainly already
+    // written SUCCESS to Firestore.
+    String? identityId;
+    for (int i = 0; i < 20; i++) {
+      await Future.delayed(const Duration(seconds: 1));
+      if (!mounted) break;
+      final doc = await FirebaseFirestore.instance
+          .collection('safehavenUserSetup')
+          .doc(uid)
+          .get();
+      final data = doc.data();
+      final status = data?['identityCheckStatus']?.toString();
+      final id = data?['identityId']?.toString();
+      print('Polling attempt $i: status=$status, identityId=$id');
+
+      if (status == 'SUCCESS' && id != null && id.isNotEmpty) {
+        identityId = id;
+        print('Webhook confirmed SUCCESS. identityId: $identityId');
+        break;
+      }
+
+      if (status == 'FAILED' || status == 'DECLINED') {
+        throw Exception('Identity verification failed: $status');
+      }
+    }
+
+    if (identityId == null) {
+      throw Exception(
+        'Identity verification timed out. Please check your OTP and try again.',
+      );
+    }
+
+    // Save to user doc
+    await FirebaseFirestore.instance.collection('users').doc(uid).set({
+      'safehavenData.identityVerification': {
+        'identityId': identityId,
+        'type': 'BVN',
+        'verified': true,
+        'timestamp': FieldValue.serverTimestamp(),
+      },
+    }, SetOptions(merge: true));
+
+    return identityId;
+  }
+
+  /// Replace _submit entirely
+  Future<void> _submit() async {
     setState(() => _isLoading = true);
 
     String? uid = FirebaseAuth.instance.currentUser?.uid;
@@ -712,6 +804,7 @@ class _UpgradeTierState extends State<UpgradeTier> {
     DocumentReference docRef = FirebaseFirestore.instance
         .collection('users')
         .doc(uid);
+
     try {
       DocumentSnapshot snap = await docRef.get();
       if (!snap.exists) {
@@ -727,12 +820,14 @@ class _UpgradeTierState extends State<UpgradeTier> {
       }
 
       if (_isBvnTierFlow) {
+        // ----- Tier 1 & Tier 2: BVN flow -----
         String firstName = _firstNameController.text.trim();
         String lastName = _lastNameController.text.trim();
         String email = userData['email'] ?? '';
         String phoneNumber = (userData['phone'] ?? '')
             .replaceFirst('+234', '')
             .trim();
+
         if (firstName.isEmpty ||
             lastName.isEmpty ||
             email.isEmpty ||
@@ -742,8 +837,9 @@ class _UpgradeTierState extends State<UpgradeTier> {
           return;
         }
         if (phoneNumber.length == 10 &&
-            RegExp(r'^\d{10}$').hasMatch(phoneNumber))
+            RegExp(r'^\d{10}$').hasMatch(phoneNumber)) {
           phoneNumber = '0$phoneNumber';
+        }
         if (!RegExp(r'^0\d{10}$').hasMatch(phoneNumber)) {
           showToast('Invalid phone number format', Colors.red);
           setState(() => _isLoading = false);
@@ -788,7 +884,9 @@ class _UpgradeTierState extends State<UpgradeTier> {
         String? customerId =
             userData['sudoData']?['customerCreation']?['data']?['id']
                 ?.toString();
+
         if (customerId == null) {
+          print('➡️ Trying to match existing customer by BVN...');
           final matched = await _tryMatchExistingCustomerByBvn(
             _bvnController.text,
             docRef,
@@ -796,7 +894,9 @@ class _UpgradeTierState extends State<UpgradeTier> {
           );
           if (matched != null) {
             customerId = matched;
+            print('✅ Matched existing customer: $customerId');
           } else {
+            print('➡️ Creating new customer via sudoCreateUser...');
             final createResult = await functions
                 .httpsCallable('sudoCreateUser')
                 .call({
@@ -814,49 +914,94 @@ class _UpgradeTierState extends State<UpgradeTier> {
             await docRef.update({
               'sudoData.customerCreation': createResult.data,
             });
+            print('✅ Customer created: $customerId');
           }
         }
 
         final existingVa = userData['sudoData']?['virtualAccount'];
-        if (existingVa == null && customerId != null && customerId.isNotEmpty) {
-          final initiateRes = await functions
-              .httpsCallable('sudoInitiateIdentityVerification')
-              .call({'type': 'BVN', 'number': _bvnController.text.trim()});
-          final identityId = initiateRes.data['data']?['identityId']
-              ?.toString();
-          setState(() => _isLoading = false);
-          final otp = await _showIdentityOtpBottomSheet();
-          if (otp == null || otp.isEmpty) {
-            showToast('Identity verification cancelled', Colors.red);
+        if (existingVa != null) {
+          // VA already exists — just update tier if needed
+          print('Electronic account already exists, skipping creation');
+          final currentTier = userData['sudoData']?['tier'];
+          if (currentTier != widget.tier) {
+            await docRef.update({'sudoData.tier': widget.tier});
+          }
+        } else if (customerId != null && customerId.isNotEmpty) {
+          // Run identity verification via webhook flow (no validate API)
+          String? resolvedIdentityId;
+          try {
+            resolvedIdentityId = await _runIdentityVerificationFlow(
+              bvn: _bvnController.text.trim(),
+              functions: functions,
+            );
+          } catch (e) {
+            showToast(e.toString().replaceFirst('Exception: ', ''), Colors.red);
             setState(() => _isLoading = false);
             return;
           }
-          setState(() => _isLoading = true);
-          await functions
-              .httpsCallable('sudoValidateIdentityVerification')
-              .call({
-                'identityId': identityId ?? '',
-                'type': 'BVN',
-                'otp': otp,
-              });
 
-          final accountResult = await functions
-              .httpsCallable('sudoCreateSubAccount')
-              .call({
-                'customerId': customerId,
-                'currency': 'NGN',
-                'type': 'IndividualCustomer',
-                'idempotencyKey': const Uuid().v4(),
-              });
-          await docRef.update({
-            'sudoData.virtualAccount': accountResult.data,
-            'sudoData.tier': widget.tier,
-          });
+          // Create sub-account — only save tier on confirmed success
+          try {
+            print('➡️ Creating sub-account via safehavenCreateSubAccount...');
+            final accountResult = await functions
+                .httpsCallable('safehavenCreateSubAccount')
+                .call({
+                  'customerId': customerId,
+                  'currency': 'NGN',
+                  'type': 'IndividualCustomer',
+                  'idempotencyKey': const Uuid().v4(),
+                  'firstName': firstName,
+                  'lastName': lastName,
+                  'email': email,
+                  'phoneNumber': phoneNumber,
+                  'country': 'NG',
+                  'state': state,
+                  'addressLine1': street,
+                  'city': city,
+                  'postalCode': postalCode.toString(),
+                  'bvn': _bvnController.text.trim(),
+                  if (resolvedIdentityId != null &&
+                      resolvedIdentityId.isNotEmpty)
+                    'identityId': resolvedIdentityId,
+                });
+
+            // ✅ Only save tier AFTER confirmed successful VA creation
+            await docRef.update({
+              'sudoData.virtualAccount': accountResult.data,
+              'sudoData.tier': widget.tier,
+            });
+            print('✅ Sub-account created, tier updated to ${widget.tier}');
+          } catch (e, st) {
+            print('❌ Error creating sub-account: $e');
+            // Check if VA was actually saved despite the error (e.g. network timeout)
+            try {
+              final verify = await docRef.get();
+              final verifyData = verify.data() as Map<String, dynamic>?;
+              final verifyVa = verifyData?['sudoData']?['virtualAccount'];
+              if (verifyVa != null) {
+                // VA exists — safe to save tier now
+                await docRef.update({'sudoData.tier': widget.tier});
+                print('✅ VA confirmed in Firestore despite error; tier saved');
+                // Fall through to success
+              } else {
+                showToast(
+                  'Account setup failed. Please try again.',
+                  Colors.red,
+                );
+                setState(() => _isLoading = false);
+                return;
+              }
+            } catch (_) {
+              showToast('Account setup failed. Please try again.', Colors.red);
+              setState(() => _isLoading = false);
+              return;
+            }
+          }
         } else {
-          await docRef.update({'sudoData.tier': widget.tier});
+          print('No customerId available to create electronic account');
         }
       } else {
-        // Tier 3 – NIN & ID
+        // ----- Tier 3: NIN & ID flow -----
         String? customerId =
             userData['sudoData']?['customerCreation']?['data']?['id'];
         if (customerId == null) {
@@ -874,11 +1019,53 @@ class _UpgradeTierState extends State<UpgradeTier> {
       }
 
       showToast('Account upgraded successfully', Colors.green);
-      navigateTo(context, HomePage());
-    } catch (e) {
-      showToast('Error: $e', Colors.red);
+      if (mounted) navigateTo(context, HomePage());
+    } catch (e, stackTrace) {
+      print('❌ ERROR during upgrade: $e');
+      print('Stack trace: $stackTrace');
+      showToast('Error: ${_getDetailedErrorMessage(e)}', Colors.red);
     } finally {
       if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  /// Enhanced error message that includes the function name if possible.
+  String _getDetailedErrorMessage(dynamic e) {
+    if (e is FirebaseFunctionsException) {
+      // Example: functionsException.code could be "NOT_FOUND", "permission-denied", etc.
+      final code = e.code ?? 'unknown';
+      final message = e.message ?? 'No details';
+      // Try to infer which call failed from the message or code
+      if (code == 'NOT_FOUND') {
+        if (message.contains('BVN') || message.contains('identity')) {
+          return 'NOT_FOUND: BVN verification failed – BVN not registered or invalid';
+        } else if (message.contains('customer')) {
+          return 'NOT_FOUND: Customer not found – please complete profile first';
+        } else {
+          return 'NOT_FOUND: $message';
+        }
+      }
+      return '[$code] $message';
+    } else if (e is FirebaseException) {
+      return '${e.code}: ${e.message}';
+    } else {
+      return e.toString();
+    }
+  }
+
+  /// Helper to extract a human‑readable message from any exception.
+  String _getErrorMessage(dynamic e) {
+    if (e is FirebaseFunctionsException) {
+      // Firebase Functions exceptions usually have a message and optional details
+      return e.message ?? 'Firebase function error (code: ${e.code})';
+    } else if (e is FirebaseException) {
+      return e.message ?? 'Firebase error: ${e.code}';
+    } else if (e is Exception) {
+      return e.toString().replaceFirst('Exception: ', '');
+    } else if (e is String) {
+      return e;
+    } else {
+      return 'An unknown error occurred';
     }
   }
 
@@ -1087,50 +1274,50 @@ class _UpgradeTierState extends State<UpgradeTier> {
                     ),
                   ],
                 ),
-              if (_bvnVerified == true) ...[
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(16),
-                  margin: const EdgeInsets.only(bottom: 20),
-                  decoration: BoxDecoration(
-                    color: Colors.green.shade50,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.green.shade200),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(
-                        Icons.check_circle,
-                        color: Colors.green.shade600,
-                        size: 24,
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'BVN Verified ✓',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: Colors.green.shade800,
-                                fontSize: 16,
-                              ),
-                            ),
-                            Text(
-                              'Your BVN is verified and cannot be changed.',
-                              style: TextStyle(
-                                color: Colors.green.shade700,
-                                fontSize: 14,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
+              // if (_bvnVerified == true) ...[
+              //   Container(
+              //     width: double.infinity,
+              //     padding: const EdgeInsets.all(16),
+              //     margin: const EdgeInsets.only(bottom: 20),
+              //     decoration: BoxDecoration(
+              //       color: Colors.green.shade50,
+              //       borderRadius: BorderRadius.circular(12),
+              //       border: Border.all(color: Colors.green.shade200),
+              //     ),
+              //     child: Row(
+              //       children: [
+              //         Icon(
+              //           Icons.check_circle,
+              //           color: Colors.green.shade600,
+              //           size: 24,
+              //         ),
+              //         const SizedBox(width: 12),
+              //         Expanded(
+              //           child: Column(
+              //             crossAxisAlignment: CrossAxisAlignment.start,
+              //             children: [
+              //               Text(
+              //                 'BVN Verified ✓',
+              //                 style: TextStyle(
+              //                   fontWeight: FontWeight.bold,
+              //                   color: Colors.green.shade800,
+              //                   fontSize: 16,
+              //                 ),
+              //               ),
+              //               Text(
+              //                 'Your BVN is verified and cannot be changed.',
+              //                 style: TextStyle(
+              //                   color: Colors.green.shade700,
+              //                   fontSize: 14,
+              //                 ),
+              //               ),
+              //             ],
+              //           ),
+              //         ),
+              //       ],
+              //     ),
+              //   ),
+              // ],
               const SizedBox(height: 20),
               // First Name – shown for Tier 1 AND Tier 2
               if (_isBvnTierFlow) ...[

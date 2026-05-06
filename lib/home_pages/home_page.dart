@@ -397,6 +397,7 @@ class _HomePageState extends State<HomePage> {
   int tier = 0;
   String kycStatus = "";
   String customerId = "";
+
   Future<void> _fetchBusinessData() async {
     try {
       final currentUser = FirebaseAuth.instance.currentUser;
@@ -424,7 +425,7 @@ class _HomePageState extends State<HomePage> {
       double monthlyCommission = 0;
       double availableCommission = 0;
       bool storefrontEnabledLocal = false;
-      // Stand user helpers (declared here so they're visible to later logic)
+      // Stand user helpers
       String? parentBusinessId;
       String? standId;
       Map<String, dynamic>? myStand;
@@ -443,19 +444,12 @@ class _HomePageState extends State<HomePage> {
         createAccountBannerValue: showCreateBusinessBankAccountBanner,
         bannerValue: showStorefrontActivationBanner,
       );
-      // reset parent business name (avoid stale value)
       parentBusinessName = '';
-      // reset logged-in-stand flag
       isLoggedInStandUser = false;
 
-      // Early detection: if this auth user is a stand (has parentBusinessId + standId
-      // in their `users/{uid}` doc) we should treat them as a stand user and
-      // suppress any KYC banners that apply to parent businesses. Fetch the
-      // parent business and stand account immediately so we can show correct
-      // account details and balance.
+      // Early detection for stand user
       bool earlyStandUser = false;
       try {
-        // Stand users are stored in `standUsers` collection. Check there.
         DocumentSnapshot userDoc = await FirebaseFirestore.instance
             .collection('standUsers')
             .doc(uid)
@@ -467,12 +461,10 @@ class _HomePageState extends State<HomePage> {
             standId = udata['standId'];
             earlyStandUser = true;
             isLoggedInStandUser = true;
-            // Treat as stand user: suppress banners and mark as KYB-verified (inherits parent's KYB)
             isBusinessAccount = true;
             showAwaitingDocsBanner = false;
             showCreateBusinessBankAccountBanner = false;
 
-            // Load parent business and find the stand record to extract account info
             if (parentBusinessId != null) {
               DocumentSnapshot parentBusSnap = await FirebaseFirestore.instance
                   .collection('businesses')
@@ -481,7 +473,6 @@ class _HomePageState extends State<HomePage> {
               if (parentBusSnap.exists) {
                 Map<String, dynamic> parentData =
                     parentBusSnap.data() as Map<String, dynamic>;
-                // Prefer `business_data.name` in the business doc root, fall back to legacy `businessName`.
                 Map<String, dynamic>? businessDataMap =
                     parentData['business_data'] as Map<String, dynamic>?;
                 busName =
@@ -521,7 +512,6 @@ class _HomePageState extends State<HomePage> {
                   }
                 }
                 activeStandId = standId;
-                // persist parent business name for UI use
                 parentBusinessName = busName;
                 setState(() {
                   userTag = busName.replaceAll(' ', '_');
@@ -535,238 +525,248 @@ class _HomePageState extends State<HomePage> {
       }
 
       if (earlyStandUser) {
-        // Skip the standard business KYC parsing below - we've already loaded
-        // the relevant parent/stand info above.
-      }
-
-      // REMOVE this line entirely — kybCreation no longer exists:
-      // customerId = data["kybCreation"]["data"]["id"];  ← DELETE
-
-      // REPLACE the business account resolution block with:
-      if (busSnap.exists && !earlyStandUser) {
-        Map<String, dynamic> data = busSnap.data() as Map<String, dynamic>;
-
-        isSuperAgent = data['isSuperAgent'] == true;
-        storefrontEnabledLocal = data['storefront']?['enabled'] == true;
-        stars = (data['superAgentStars'] ?? 0) is int
-            ? (data['superAgentStars'] ?? 0) as int
-            : int.tryParse((data['superAgentStars'] ?? '0').toString()) ?? 0;
-        availableCommission =
-            (data['superAgentAvailableEarnings'] as num?)?.toDouble() ?? 0.0;
-        if (isSuperAgent) {
-          monthlyCommission = await _fetchCurrentMonthCommissionsTotal(uid);
-        }
-
-        kybStatus = data['kycStatus'] ?? '';
-        isKybApproved = kybStatus == "APPROVED";
-
-        // Use central resolver instead of kybCreation
-        final vaData = await resolveVirtualAccount(uid);
-        businessAccountId = vaData?['id']?.toString();
-
-        // Determine if this business has a virtual account at all
-        // (regardless of KYB status — safehavenData.virtualAccount is the source of truth)
-        final bizSafehaven = data['safehavenData'] as Map<String, dynamic>?;
-        final bizVa = bizSafehaven?['virtualAccount'] as Map<String, dynamic>?;
-        final bizVaData = bizVa?['data'] as Map<String, dynamic>?;
-        final hasBizVirtualAccount = bizVaData?['id'] != null;
-
-        if (hasBizVirtualAccount) {
-          // Business has a virtual account — treat as approved regardless of kycStatus
-          isKybApproved = true;
-          businessAccountId = bizVaData!['id'].toString();
-          showCreateBusinessBankAccountBanner = false;
-          showAwaitingDocsBanner = false;
-        } else {
-          showAwaitingDocsBanner =
-              kybStatus == "AWAITING_DOCUMENT" &&
-              (data['requiredDocuments'] is List) &&
-              (data['requiredDocuments'] as List).isNotEmpty;
-          if (isKybApproved && businessAccountId == null) {
-            showCreateBusinessBankAccountBanner = true;
-          }
-        }
-
-        // Fetch balance using resolved account id
-        if (businessAccountId != null) {
-          try {
-            bal = await sudoFetchAccountBalance(businessAccountId!);
-          } catch (e) {
-            debugPrint('Error fetching business balance: $e');
-          }
-        }
-      }
-
-      // Decide which account to use
-      // Replace this entire block:
-      if (busSnap.exists && isKybApproved && businessAccountId != null) {
-        Map<String, dynamic> data = busSnap.data() as Map<String, dynamic>;
-
-        // Get name from business_data (new structure) or legacy fields
-        final businessDataMap = data['business_data'] as Map<String, dynamic>?;
-        busName = businessDataMap?['name'] ?? data['businessName'] ?? busName;
-
-        // Get account number from safehavenData.virtualAccount
-        final safehavenData = data['safehavenData'] as Map<String, dynamic>?;
-        final va = safehavenData?['virtualAccount'] as Map<String, dynamic>?;
-        final vaData = va?['data'] as Map<String, dynamic>?;
-        final attrs = vaData?['attributes'] as Map<String, dynamic>?;
-        busPhone = attrs?['accountNumber']?.toString() ?? busPhone;
-
-        // Get user name from users collection
+        // Stand user already handled – skip remaining business logic.
+      } else {
+        // ----- FETCH TIER FROM USERS DOC (source of truth for KYB) -----
+        int userTier = 0;
         try {
           final userDoc = await FirebaseFirestore.instance
               .collection('users')
               .doc(uid)
               .get();
           if (userDoc.exists) {
-            final ud = userDoc.data()!;
-            first = ud['firstName']?.toString() ?? first;
-            last = ud['lastName']?.toString() ?? last;
+            final userData = userDoc.data()!;
+            final safehavenTier =
+                (userData['safehavenData']?['tier'] as num?)?.toInt() ?? 0;
+            final sudoTier =
+                (userData['sudoData']?['tier'] as num?)?.toInt() ?? 0;
+            userTier = safehavenTier > 0 ? safehavenTier : sudoTier;
           }
         } catch (e) {
-          debugPrint('Error fetching user names: $e');
+          debugPrint('Error fetching user tier: $e');
         }
 
-        bal = await sudoFetchAccountBalance(businessAccountId!);
-        isBusinessAccount = true;
-        setState(() => userTag = busName.replaceAll(' ', '_'));
-      } else if (!earlyStandUser) {
-        // Check if auth user exists in regular `users` collection, otherwise
-        // fall back to `standUsers` (some accounts may live there).
-        DocumentSnapshot userSnap = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(uid)
-            .get();
-        if (!userSnap.exists) {
-          userSnap = await FirebaseFirestore.instance
-              .collection('standUsers')
+        if (busSnap.exists) {
+          Map<String, dynamic> data = busSnap.data() as Map<String, dynamic>;
+
+          isSuperAgent = data['isSuperAgent'] == true;
+          storefrontEnabledLocal = data['storefront']?['enabled'] == true;
+          stars = (data['superAgentStars'] ?? 0) is int
+              ? (data['superAgentStars'] ?? 0) as int
+              : int.tryParse((data['superAgentStars'] ?? '0').toString()) ?? 0;
+          availableCommission =
+              (data['superAgentAvailableEarnings'] as num?)?.toDouble() ?? 0.0;
+          if (isSuperAgent) {
+            monthlyCommission = await _fetchCurrentMonthCommissionsTotal(uid);
+          }
+
+          kybStatus = data['kycStatus'] ?? '';
+
+          // ---------- NEW RULE: Only tier 3 is fully KYB approved ----------
+          isKybApproved = (userTier == 3);
+
+          // Determine if business has a virtual account (safehavenData.virtualAccount)
+          final bizSafehaven = data['safehavenData'] as Map<String, dynamic>?;
+          final bizVa =
+              bizSafehaven?['virtualAccount'] as Map<String, dynamic>?;
+          final bizVaData = bizVa?['data'] as Map<String, dynamic>?;
+          final hasBizVirtualAccount = bizVaData?['id'] != null;
+
+          // ----- Banner logic based on tier and virtual account existence -----
+          if (isKybApproved && !hasBizVirtualAccount) {
+            // Tier 3 but no virtual account → show "Create Bank Account" banner
+            showCreateBusinessBankAccountBanner = true;
+            showAwaitingDocsBanner = false;
+          } else {
+            showCreateBusinessBankAccountBanner = false;
+            // For tiers 1,2 or tier 3 with account already, check for required documents
+            if (kybStatus == "AWAITING_DOCUMENT" &&
+                (data['requiredDocuments'] is List) &&
+                (data['requiredDocuments'] as List).isNotEmpty) {
+              showAwaitingDocsBanner = true;
+            } else {
+              showAwaitingDocsBanner = false;
+            }
+          }
+
+          // Resolve account ID and balance (if possible)
+          if (hasBizVirtualAccount) {
+            businessAccountId = bizVaData!['id'].toString();
+          } else {
+            final vaData = await resolveVirtualAccount(uid);
+            businessAccountId = vaData?['id']?.toString();
+          }
+
+          if (businessAccountId != null) {
+            try {
+              bal = await sudoFetchAccountBalance(businessAccountId!);
+            } catch (e) {
+              debugPrint('Error fetching business balance: $e');
+            }
+          }
+        }
+
+        // Decide which account to use (business or personal)
+        if (busSnap.exists && isKybApproved && businessAccountId != null) {
+          Map<String, dynamic> data = busSnap.data() as Map<String, dynamic>;
+          final businessDataMap =
+              data['business_data'] as Map<String, dynamic>?;
+          busName = businessDataMap?['name'] ?? data['businessName'] ?? busName;
+
+          final safehavenData = data['safehavenData'] as Map<String, dynamic>?;
+          final va = safehavenData?['virtualAccount'] as Map<String, dynamic>?;
+          final vaData = va?['data'] as Map<String, dynamic>?;
+          final attrs = vaData?['attributes'] as Map<String, dynamic>?;
+          busPhone = attrs?['accountNumber']?.toString() ?? busPhone;
+
+          try {
+            final userDoc = await FirebaseFirestore.instance
+                .collection('users')
+                .doc(uid)
+                .get();
+            if (userDoc.exists) {
+              final ud = userDoc.data()!;
+              first = ud['firstName']?.toString() ?? first;
+              last = ud['lastName']?.toString() ?? last;
+            }
+          } catch (e) {
+            debugPrint('Error fetching user names: $e');
+          }
+
+          bal = await sudoFetchAccountBalance(businessAccountId!);
+          isBusinessAccount = true;
+          setState(() => userTag = busName.replaceAll(' ', '_'));
+        } else if (!earlyStandUser) {
+          // Check if auth user exists in regular `users` collection, otherwise
+          // fall back to `standUsers` (some accounts may live there).
+          DocumentSnapshot userSnap = await FirebaseFirestore.instance
+              .collection('users')
               .doc(uid)
               .get();
-        }
-        if (userSnap.exists) {
-          Map<String, dynamic> data = userSnap.data() as Map<String, dynamic>;
-          parentBusinessId = data['parentBusinessId'];
-          standId = data['standId'];
-          first = data['firstName'] ?? first;
-          last = data['lastName'] ?? last;
-          userTag = data['userName'] ?? '';
-        }
-        if (parentBusinessId != null && standId != null) {
-          // Stand user
-          isLoggedInStandUser = true;
-          isBusinessAccount = true;
-          showAwaitingDocsBanner = false;
-          showCreateBusinessBankAccountBanner = false;
-          DocumentSnapshot parentBusSnap = await FirebaseFirestore.instance
-              .collection('businesses')
-              .doc(parentBusinessId)
-              .get();
-          if (parentBusSnap.exists) {
-            Map<String, dynamic> parentData =
-                parentBusSnap.data() as Map<String, dynamic>;
-            // Prefer `business_data.name` in the business doc root, fall back to legacy `businessName`.
-            Map<String, dynamic>? businessDataMap =
-                parentData['business_data'] as Map<String, dynamic>?;
-            busName =
-                businessDataMap?['name'] ??
-                parentData['businessName'] ??
-                busName;
-            // Find the stand
-            List<dynamic> posStands = parentData['posStands'] ?? [];
-            for (var stand in posStands) {
-              if (stand is Map<String, dynamic> &&
-                  stand['standId'] == standId) {
-                myStand = stand;
-                break;
-              }
-            }
-            if (myStand != null) {
-              final standAccountData = myStand['accountData'];
-              Map<String, dynamic>? standDataMap;
-              if (standAccountData is Map<String, dynamic> &&
-                  standAccountData.containsKey('data')) {
-                standDataMap =
-                    standAccountData['data'] as Map<String, dynamic>?;
-              }
-              final standAttributes =
-                  (standDataMap != null &&
-                      standDataMap.containsKey('attributes'))
-                  ? (standDataMap['attributes'] as Map<String, dynamic>?) ?? {}
-                  : {};
-              busPhone = standAttributes['accountNumber'] ?? 'N/A';
-              // Save parent business name for UI where we need to show
-              // the parent business name while showing stand account number.
-              parentBusinessName = busName;
-              final standAccountId = standDataMap?['id'];
-              if (standAccountId != null) {
-                bal = await sudoFetchAccountBalance(standAccountId);
-              } else {
-                bal = 0.0;
-              }
-            }
-            activeStandId = standId; // Set active stand for stand user
-            setState(() {
-              userTag = busName.replaceAll(' ', '_');
-            });
-          } else {
-            // Parent business not found, set defaults
-            busName = 'Business';
-            busPhone = 'N/A';
-            bal = 0.0;
-            activeStandId = standId;
-            setState(() {
-              userTag = busName.replaceAll(' ', '_');
-            });
+          if (!userSnap.exists) {
+            userSnap = await FirebaseFirestore.instance
+                .collection('standUsers')
+                .doc(uid)
+                .get();
           }
-        } else {
-          // Regular user
-          isBusinessAccount = false;
           if (userSnap.exists) {
             Map<String, dynamic> data = userSnap.data() as Map<String, dynamic>;
-            final personalVirtualAcc = getVirtualAccountData(data);
-            if (personalVirtualAcc != null) {
-              String? accNum =
-                  personalVirtualAcc['attributes']?['accountNumber']
-                      ?.toString();
-              // If missing, attempt to fetch and update
-              final personalAccountId = personalVirtualAcc['id']?.toString();
-              if ((accNum == null || accNum.toString().isEmpty) &&
-                  personalAccountId != null) {
-                await _fetchAndUpdateVirtualAccount(
-                  personalAccountId,
-                  FirebaseFirestore.instance.collection('users').doc(uid),
-                );
-                final refreshed = await FirebaseFirestore.instance
-                    .collection('users')
-                    .doc(uid)
-                    .get();
-                accNum = getVirtualAccountData(
-                  refreshed.data(),
-                )?['attributes']?['accountNumber']?.toString();
+            parentBusinessId = data['parentBusinessId'];
+            standId = data['standId'];
+            first = data['firstName'] ?? first;
+            last = data['lastName'] ?? last;
+            userTag = data['userName'] ?? '';
+          }
+          if (parentBusinessId != null && standId != null) {
+            // Stand user (non‑early branch)
+            isLoggedInStandUser = true;
+            isBusinessAccount = true;
+            showAwaitingDocsBanner = false;
+            showCreateBusinessBankAccountBanner = false;
+            DocumentSnapshot parentBusSnap = await FirebaseFirestore.instance
+                .collection('businesses')
+                .doc(parentBusinessId)
+                .get();
+            if (parentBusSnap.exists) {
+              Map<String, dynamic> parentData =
+                  parentBusSnap.data() as Map<String, dynamic>;
+              Map<String, dynamic>? businessDataMap =
+                  parentData['business_data'] as Map<String, dynamic>?;
+              busName =
+                  businessDataMap?['name'] ??
+                  parentData['businessName'] ??
+                  busName;
+              List<dynamic> posStands = parentData['posStands'] ?? [];
+              for (var stand in posStands) {
+                if (stand is Map<String, dynamic> &&
+                    stand['standId'] == standId) {
+                  myStand = stand;
+                  break;
+                }
               }
-
-              busPhone = accNum ?? 'N/A';
-              tier = int.tryParse(getWalletTier(data) ?? '0') ?? 0;
-              String? personalAccountId2 = personalVirtualAcc['id']?.toString();
-              if (personalAccountId2 != null) {
-                bal = await sudoFetchAccountBalance(personalAccountId2);
+              if (myStand != null) {
+                final standAccountData = myStand['accountData'];
+                Map<String, dynamic>? standDataMap;
+                if (standAccountData is Map<String, dynamic> &&
+                    standAccountData.containsKey('data')) {
+                  standDataMap =
+                      standAccountData['data'] as Map<String, dynamic>?;
+                }
+                final standAttributes =
+                    (standDataMap != null &&
+                        standDataMap.containsKey('attributes'))
+                    ? (standDataMap['attributes'] as Map<String, dynamic>?) ??
+                          {}
+                    : {};
+                busPhone = standAttributes['accountNumber'] ?? 'N/A';
+                parentBusinessName = busName;
+                final standAccountId = standDataMap?['id'];
+                if (standAccountId != null) {
+                  bal = await sudoFetchAccountBalance(standAccountId);
+                } else {
+                  bal = 0.0;
+                }
               }
+              activeStandId = standId;
+              setState(() {
+                userTag = busName.replaceAll(' ', '_');
+              });
             } else {
+              busName = 'Business';
               busPhone = 'N/A';
               bal = 0.0;
+              activeStandId = standId;
+              setState(() {
+                userTag = busName.replaceAll(' ', '_');
+              });
+            }
+          } else {
+            // Regular user (personal account)
+            isBusinessAccount = false;
+            if (userSnap.exists) {
+              Map<String, dynamic> data =
+                  userSnap.data() as Map<String, dynamic>;
+              final personalVirtualAcc = getVirtualAccountData(data);
+              if (personalVirtualAcc != null) {
+                String? accNum =
+                    personalVirtualAcc['attributes']?['accountNumber']
+                        ?.toString();
+                final personalAccountId = personalVirtualAcc['id']?.toString();
+                if ((accNum == null || accNum.toString().isEmpty) &&
+                    personalAccountId != null) {
+                  await _fetchAndUpdateVirtualAccount(
+                    personalAccountId,
+                    FirebaseFirestore.instance.collection('users').doc(uid),
+                  );
+                  final refreshed = await FirebaseFirestore.instance
+                      .collection('users')
+                      .doc(uid)
+                      .get();
+                  accNum = getVirtualAccountData(
+                    refreshed.data(),
+                  )?['attributes']?['accountNumber']?.toString();
+                }
+                busPhone = accNum ?? 'N/A';
+                tier = int.tryParse(getWalletTier(data) ?? '0') ?? 0;
+                String? personalAccountId2 = personalVirtualAcc['id']
+                    ?.toString();
+                if (personalAccountId2 != null) {
+                  bal = await sudoFetchAccountBalance(personalAccountId2);
+                }
+              } else {
+                busPhone = 'N/A';
+                bal = 0.0;
+              }
             }
           }
         }
       }
 
+      // Build full name and businesses list
       String fullName = "$first $last".trim();
-
-      // Load stands and create business entries
       List<Map<String, dynamic>> allBusinesses = [];
 
       if (parentBusinessId != null && standId != null) {
-        // For stand user, add their stand
         if (myStand != null) {
           final standAccountData = myStand['accountData'];
           Map<String, dynamic>? standDataMap;
@@ -779,8 +779,7 @@ class _HomePageState extends State<HomePage> {
               ? (standDataMap['attributes'] as Map<String, dynamic>?) ?? {}
               : {};
           final standAccountNumber = standAttributes['accountNumber'] ?? 'N/A';
-          double standBalance = bal; // already fetched
-
+          double standBalance = bal;
           allBusinesses.add({
             'name': myStand['name'] ?? 'POS Stand',
             'phone': standAccountNumber,
@@ -796,7 +795,6 @@ class _HomePageState extends State<HomePage> {
             ],
           });
         } else {
-          // Stand not found, add default
           allBusinesses.add({
             'name': 'My POS Stand',
             'phone': busPhone,
@@ -833,28 +831,21 @@ class _HomePageState extends State<HomePage> {
         // Load stands
         Map<String, dynamic> busData = busSnap.data() as Map<String, dynamic>;
         List<dynamic> posStands = busData['posStands'] ?? [];
-
         for (var stand in posStands) {
           if (stand is Map<String, dynamic>) {
             final standAccountData = stand['accountData'];
-
-            // Safely extract nested data
             Map<String, dynamic>? standDataMap;
             if (standAccountData is Map<String, dynamic> &&
                 standAccountData.containsKey('data')) {
               standDataMap = standAccountData['data'] as Map<String, dynamic>?;
             }
-
             final standAttributes =
                 (standDataMap != null && standDataMap.containsKey('attributes'))
                 ? (standDataMap['attributes'] as Map<String, dynamic>?) ?? {}
                 : {};
-
             final standAccountNumber =
                 standAttributes['accountNumber'] ?? 'N/A';
             final standAccountId = standDataMap?['id'];
-
-            // Fetch stand balance if we have account ID
             double standBalance = 0.0;
             if (standAccountId != null) {
               try {
@@ -863,7 +854,6 @@ class _HomePageState extends State<HomePage> {
                 debugPrint('Error fetching stand balance: $e');
               }
             }
-
             allBusinesses.add({
               'name': stand['name'] ?? 'POS Stand',
               'phone': standAccountNumber,
@@ -913,13 +903,11 @@ class _HomePageState extends State<HomePage> {
       final hasStorefrontTag = (userTag ?? '').trim().isNotEmpty;
 
       setState(() {
-        // If this is a stand user, prefer showing the stand name at the top.
         String displayTopName = (parentBusinessId != null && standId != null)
             ? (myStand != null ? (myStand['name'] ?? busName) : busName)
             : (isBusinessAccount
                   ? busName
                   : (fullName.isNotEmpty ? fullName : ''));
-
         userName = displayTopName;
         businesses = allBusinesses;
         _currentBusinessIndex = selectedIndex;

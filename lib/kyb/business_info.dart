@@ -1225,13 +1225,13 @@ class _BusinessInformationState extends State<BusinessInformation> {
               'virtualAccount': {'data': result.data},
             },
           }, SetOptions(merge: true));
-  //set tier to 2
+  //set tier to 3
    await FirebaseFirestore.instance
           .collection('users')
           .doc(user.uid)
           .set({
             'safehavenData': {
-              'tier': 2,
+              'tier': 3,
             },
           }, SetOptions(merge: true));
      _showSuccessModal();

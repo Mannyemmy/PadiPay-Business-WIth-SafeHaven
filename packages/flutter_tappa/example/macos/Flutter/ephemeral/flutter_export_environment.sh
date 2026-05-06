@@ -1,7 +1,7 @@
 #!/bin/sh
 # This is a generated file; do not edit or check into version control.
 export "FLUTTER_ROOT=D:\Dev\flutter\flutter"
-export "FLUTTER_APPLICATION_PATH=D:\Dev\padi_pay_business\packages\flutter_tappa\example"
+export "FLUTTER_APPLICATION_PATH=D:\Dev\padi_pay_business - safehaven\packages\flutter_tappa\example"
 export "COCOAPODS_PARALLEL_CODE_SIGN=true"
 export "FLUTTER_BUILD_DIR=build"
 export "FLUTTER_BUILD_NAME=1.0.0"
