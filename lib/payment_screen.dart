@@ -1,3 +1,4 @@
+import 'package:padi_pay_business/atm_transaction_service.dart';
 import 'package:vibration/vibration.dart';
 import 'package:flutter_ringtone_player/flutter_ringtone_player.dart';
 import 'package:cloud_functions/cloud_functions.dart';
@@ -35,6 +36,13 @@ class _UncertainException implements Exception {
   const _UncertainException();
 }
 
+// Add at the top of the file, outside the class:
+Completer<String>? _globalTxCompleter;
+String _globalTxRrn = '';
+double _globalRawAmount = 0;
+String _globalSafeHavenRrn = '';
+String _globalChargedAmount = '';
+String _globalTxTag = '';
 Future<void> _saveTappaLog({
   required String eventType,
   required String status,
@@ -424,8 +432,8 @@ Future<Map<String, dynamic>?> _fetchMerchantVirtualAccount() async {
       );
 
       if (data != null) {
-        final sudoData = data['sudoData'] as Map<String, dynamic>?;
-        dynamic vaRaw = sudoData?['virtualAccount']?['data'];
+        final safehavenData = data['safehavenData'] as Map<String, dynamic>?;
+        dynamic vaRaw = safehavenData?['virtualAccount']?['data'];
 
         vaRaw ??= data['virtualAccount'];
 
@@ -466,9 +474,9 @@ Future<Map<String, dynamic>?> _fetchMerchantVirtualAccount() async {
         final data = userDoc.data();
         debugPrint('[Settlement] users doc keys: ${data?.keys.toList()}');
 
-        final vaRaw = data?['sudoData']?['virtualAccount']?['data'];
+        final vaRaw = data?['safehavenData']?['virtualAccount']?['data'];
         debugPrint(
-          '[Settlement] users sudoData.virtualAccount.data present: ${vaRaw != null}',
+          '[Settlement] users safehavenData.virtualAccount.data present: ${vaRaw != null}',
         );
 
         if (vaRaw != null) {
@@ -589,12 +597,12 @@ Future<Map<String, dynamic>?> _fetchMerchantVirtualAccount() async {
           }
 
           final Map<String, dynamic> updateData = {};
-          updateData['sudoData.virtualAccount.data.attributes.bank.id'] =
+          updateData['safehavenData.virtualAccount.data.attributes.bank.id'] =
               fetchedBankId;
           updateData['bankId'] = fetchedBankId;
 
           if (existingBankName.isEmpty && fetchedBankName.isNotEmpty) {
-            updateData['sudoData.virtualAccount.data.attributes.bank.name'] =
+            updateData['safehavenData.virtualAccount.data.attributes.bank.name'] =
                 fetchedBankName;
             updateData['bankName'] = fetchedBankName;
           }
@@ -658,8 +666,9 @@ class _PaymentScreenState extends State<PaymentScreen> {
   // Raw channels for armTagDetection — bypasses the Dart wrapper so we can
   // use the published flutter_tappa 0.0.7-2 without needing a local fork.
   static const MethodChannel _tappaRawChannel = MethodChannel('flutter_tappa');
-  static const EventChannel _tappaEventChannel =
-      EventChannel('com.mba.tappa/events');
+  static const EventChannel _tappaEventChannel = EventChannel(
+    'com.mba.tappa/events',
+  );
   StreamSubscription<dynamic>? _tagDetectionSub;
 
   bool _isTransactionActive = false;
@@ -676,7 +685,8 @@ class _PaymentScreenState extends State<PaymentScreen> {
   _TxStatus _txStatus = _TxStatus.idle;
   _TxFailure? _txFailure;
   String _txRrn = '';
-  String _safeHavenRrn = ''; // retrievalReferenceNumber from Safe Haven's Kimono response
+  String _safeHavenRrn =
+      ''; // retrievalReferenceNumber from Safe Haven's Kimono response
   String? _txDocId; // Firestore document ID of the saved ATM transaction
   bool _isReconciling = false;
   String? _reconcileResult; // 'success' | 'failed' | 'pending' | null
@@ -722,14 +732,17 @@ class _PaymentScreenState extends State<PaymentScreen> {
   /// Called when MainActivity comes back to foreground (e.g. after PinActivity
   /// closes). If Tappa's callback hasn't fired within 500 ms, that means the
   /// user cancelled — complete the completer as cancelled.
+  // AFTER:
+
+  // WITH THIS:
   Future<void> _onAppResumed() async {
-    if (_txCompleter == null || _txCompleter!.isCompleted) return;
-    debugPrint('[Tappa] App resumed with pending tx — waiting 500ms for callback...');
-    await Future.delayed(const Duration(milliseconds: 500));
-    if (_txCompleter != null && !_txCompleter!.isCompleted) {
-      debugPrint('[Tappa] No callback after resume — treating as PIN cancel');
-      _txCompleter!.completeError(const _CancelledException());
-    }
+    // Do NOT cancel the completer. Just log that we resumed.
+    debugPrint(
+      '[Tappa] App resumed, pending completer exists: ${_txCompleter != null && !_txCompleter!.isCompleted}',
+    );
+    // The callback will arrive via the TransactionService eventually.
+    // If you need to handle the case where the PinActivity was dismissed without a callback,
+    // the 90-second timeout will handle it.
   }
 
   Future<void> _stopNfc() async {
@@ -739,20 +752,11 @@ class _PaymentScreenState extends State<PaymentScreen> {
     }
 
     try {
-      debugPrint('[Tappa] Stopping NFC listener (Dart + Native)...');
-      _tappa.clearCallbacks();
-
-      await _tappa.initialize(
-        errorCallback: (code, msg) {
-          debugPrint('[Tappa] Post-dispose callback ignored: $code');
-        },
-        isSandBoxMode: false,
-      );
-
+      debugPrint('[Tappa] Disabling NFC reader mode (native)');
       await _nfcChannel.invokeMethod('disableReaderMode');
-      debugPrint('[Tappa] ✅ NFC fully stopped (reader mode disabled natively)');
+      debugPrint('[Tappa] ✅ NFC reader mode disabled');
     } catch (e) {
-      debugPrint('[Tappa] Stop NFC failed: $e');
+      debugPrint('[Tappa] Failed to disable reader mode: $e');
     }
   }
 
@@ -771,15 +775,30 @@ class _PaymentScreenState extends State<PaymentScreen> {
     final String rrn = _generateRrn();
     final String txTagInput = _tagController.text.trim().toLowerCase();
     final bool simulateSlowNetwork = kDebugMode && txTagInput.contains('#slow');
-    final bool simulateNetworkOutage = kDebugMode && txTagInput.contains('#outage');
+    final bool simulateNetworkOutage =
+        kDebugMode && txTagInput.contains('#outage');
     _txRrn = rrn;
     _rawAmount = naira;
     _chargedAmount = _formatAmountDisplay(naira.toString());
 
-    _txCompleter = Completer<String>();
+    // Start transaction in the global service BEFORE calling transact()
+    TransactionService().startTransaction(
+      rrn: rrn,
+      amount: naira,
+      chargedAmount: _chargedAmount,
+      tag: _tagController.text.trim(),
+    );
+
+    // Store the Future – NOT a Completer
+    final transactionFuture = TransactionService().future;
+
+    // Still keep global vars for legacy references (optional; can remove)
+    _globalTxRrn = rrn;
+    _globalRawAmount = naira;
+    _globalChargedAmount = _formatAmountDisplay(naira.toString());
+    _globalTxTag = _tagController.text.trim();
     _isTransactionActive = true;
 
-    // ── Mark transaction as active so button disables immediately ────────────
     setState(() {
       _txActive = true;
       _txStatus = _TxStatus.processing;
@@ -788,12 +807,6 @@ class _PaymentScreenState extends State<PaymentScreen> {
     debugPrint(
       '[Tappa] Charge initiated — amount=NGN$_chargedAmount kobo=$kobo rrn=$rrn',
     );
-    if (simulateSlowNetwork || simulateNetworkOutage) {
-      debugPrint(
-        '[Tappa][Debug] Simulation active: slow=$simulateSlowNetwork outage=$simulateNetworkOutage',
-      );
-    }
-
     await _saveTappaLog(
       eventType: 'transaction_initiated',
       status: 'processing',
@@ -805,7 +818,6 @@ class _PaymentScreenState extends State<PaymentScreen> {
     if (!mounted) return;
 
     BuildContext? dialogContext;
-
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -815,9 +827,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
           statusStream: _nfcStatusNotifier.stream,
           onCancel: () {
             debugPrint('[Tappa] Transaction cancelled by user');
-            if (_txCompleter != null && !_txCompleter!.isCompleted) {
-              _txCompleter!.completeError(const _CancelledException());
-            }
+            TransactionService().completeError(const _CancelledException());
           },
         );
       },
@@ -830,39 +840,35 @@ class _PaymentScreenState extends State<PaymentScreen> {
         rrn: rrn,
       );
 
-      if (simulateSlowNetwork) {
-        // Simulates poor network before callback arrives.
+      if (simulateSlowNetwork)
         await Future.delayed(const Duration(seconds: 15));
-      }
-
       if (simulateNetworkOutage) {
-        // Simulates a network drop after card flow starts.
         _nfcStatusNotifier.add('__uncertain__');
         throw const _UncertainException();
       }
 
-      // Arm tag detection via raw channel (added to FlutterTappaPlugin.kt).
-      // Fires __reading__ signal the moment the card touches, before full read.
+      // Arm tag detection (optional)
       _tagDetectionSub?.cancel();
-      _tagDetectionSub = _tappaEventChannel.receiveBroadcastStream().listen(
-        (event) {
-          if (event is Map && event['event'] == 'tag_detected') {
-            _tagDetectionSub?.cancel();
-            _tagDetectionSub = null;
-            if (mounted && !_nfcStatusNotifier.isClosed) {
-              _nfcStatusNotifier.add('__reading__');
-            }
+      _tagDetectionSub = _tappaEventChannel.receiveBroadcastStream().listen((
+        event,
+      ) {
+        if (event is Map && event['event'] == 'tag_detected') {
+          _tagDetectionSub?.cancel();
+          _tagDetectionSub = null;
+          if (mounted && !_nfcStatusNotifier.isClosed) {
+            _nfcStatusNotifier.add('__reading__');
           }
-        },
-        onError: (e) => debugPrint('[Tappa] tagDetection event error: $e'),
-      );
-      _tappaRawChannel.invokeMethod<void>('armTagDetection', {
-        'amount': kobo.toString(),
-        'accountType': 'savings',
-        'rrn': rrn,
-      }).catchError((e) {
-        debugPrint('[Tappa] armTagDetection invoke failed: $e');
-      });
+        }
+      }, onError: (e) => debugPrint('[Tappa] tagDetection event error: $e'));
+      _tappaRawChannel
+          .invokeMethod<void>('armTagDetection', {
+            'amount': kobo.toString(),
+            'accountType': 'savings',
+            'rrn': rrn,
+          })
+          .catchError(
+            (e) => debugPrint('[Tappa] armTagDetection invoke failed: $e'),
+          );
 
       debugPrint(
         '[Tappa] transact() armed NFC — waiting for result via callback...',
@@ -870,14 +876,15 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
       String cardData;
       _txStartTime = DateTime.now();
-      cardData = await _txCompleter!.future.timeout(
+      cardData = await transactionFuture.timeout(
         const Duration(seconds: 90),
         onTimeout: () {
           debugPrint('[Tappa] ⏰ 90s timeout — marking payment as failed');
           throw const _PaymentException(
             _TxFailure(
               title: 'Payment Failed',
-              detail: 'Transaction timed out after 90 seconds and was not found. Please try again.',
+              detail:
+                  'Transaction timed out after 90 seconds and was not found. Please try again.',
               icon: Icons.timer_off_rounded,
               color: Color(0xFFE74C3C),
             ),
@@ -886,7 +893,6 @@ class _PaymentScreenState extends State<PaymentScreen> {
       );
 
       debugPrint('[Tappa] Transaction response. data=$cardData');
-
       await _saveTappaLog(
         eventType: 'transaction_success',
         status: 'success',
@@ -895,59 +901,32 @@ class _PaymentScreenState extends State<PaymentScreen> {
         cardData: cardData,
       );
 
-      if (dialogContext != null && mounted) {
-        Navigator.of(dialogContext!).pop();
-      }
-
+      if (dialogContext != null && mounted) Navigator.of(dialogContext!).pop();
       await Future.delayed(const Duration(milliseconds: 100));
 
       if (mounted) {
-        final savedAmount = _rawAmount.toStringAsFixed(0); // "50"
+        final savedAmount = _rawAmount.toStringAsFixed(0);
         final savedRef = _txRrn;
-        final amountNaira = _rawAmount;
-        final txTag = _tagController.text.trim();
 
-        // Extract Safe Haven's retrievalReferenceNumber for Kimono reconciliation
+        // Parse fees for display only – transaction already saved by service
+        int fees = 0;
         try {
           final d = jsonDecode(cardData) as Map<String, dynamic>;
-          _safeHavenRrn = (d['data']?['retrievalReferenceNumber'] as String?) ?? '';
-          debugPrint('[Tappa] Extracted safeHavenRrn=$_safeHavenRrn from cardData');
-        } catch (_) {}
-
-        _saveAtmTransaction(
-          status: 'success',
-          amount: _rawAmount,
-          cardData: cardData,
-          tag: txTag.isNotEmpty ? txTag : null,
-          feesKobo: () {
-            try {
-              final d = jsonDecode(cardData) as Map<String, dynamic>;
-              return (d['data']?['fees'] as num?)?.toInt();
-            } catch (_) { return null; }
-          }(),
-        );
-
-        // Auto-save PadiBook income entry
-        _savePadiBookEntry(
-          amount: _rawAmount,
-          rrn: savedRef,
-          tag: txTag,
-        );
-
-        _executeSettlement(amountNaira: amountNaira, rrn: savedRef);
+          final dynamic rawFees = d['data']?['fees'];
+          fees = (rawFees as num?)?.toInt() ?? 0;
+        } catch (e) {
+          debugPrint('[Tappa] Failed to parse fees: $e');
+        }
 
         _amountController.clear();
         _tagController.clear();
-
-        final Map<String, dynamic> jsonData = jsonDecode(cardData);
-        final int fees = jsonData['data']['fees'] as int;
 
         showModalBottomSheet(
           context: context,
           isDismissible: false,
           enableDrag: false,
           builder: (_) => AtmPaymentSuccessfulPage(
-            amount: savedAmount, // "50" — the amount user entered
+            amount: savedAmount,
             actionText: 'New Transaction',
             title: 'Payment Received',
             description: 'Contactless card payment processed successfully.',
@@ -956,7 +935,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
             bankCode: '',
             accountNumber: '',
             reference: savedRef,
-            fees: fees.toString(), // "25"
+            fees: fees.toString(),
           ),
           isScrollControlled: true,
         );
@@ -970,21 +949,21 @@ class _PaymentScreenState extends State<PaymentScreen> {
         eventType: uncertain
             ? 'transaction_pending'
             : cancelled
-                ? 'transaction_cancelled'
-                : 'transaction_failed',
+            ? 'transaction_cancelled'
+            : 'transaction_failed',
         status: uncertain ? 'pending' : (cancelled ? 'cancelled' : 'failed'),
         amount: _chargedAmount,
         rrn: _txRrn,
         errorCode: cancelled
             ? 'CANCELLED'
             : uncertain
-                ? 'PENDING'
-                : e.toString(),
+            ? 'PENDING'
+            : e.toString(),
         errorMessage: cancelled
             ? 'User cancelled transaction'
             : uncertain
-                ? 'Network dropped mid-transaction — payment status pending reconciliation. RRN: $_txRrn'
-                : (e is _PaymentException ? e.failure.detail : e.toString()),
+            ? 'Network dropped mid-transaction — payment status pending reconciliation. RRN: $_txRrn'
+            : (e is _PaymentException ? e.failure.detail : e.toString()),
         additionalData: {
           'errorType': e.runtimeType.toString(),
           'cancelled': cancelled,
@@ -993,19 +972,17 @@ class _PaymentScreenState extends State<PaymentScreen> {
       );
 
       if (mounted) {
-        // Close dialog if still open
-        if (dialogContext != null) {
-          Navigator.of(dialogContext!).pop();
-        }
+        if (dialogContext != null) Navigator.of(dialogContext!).pop();
 
         if (uncertain) {
           setState(() => _txStatus = _TxStatus.uncertain);
-          // Save the transaction first so _txDocId is populated, then auto-reconcile
-          await _saveAtmTransaction(status: 'pending', amount: _rawAmount);
+          // Service already saved pending; keep screen for reconciliation
           _reconcileCurrentTransaction();
         } else if (cancelled) {
-          // PIN activity cancelled — reinitialise so NFC works again
           debugPrint('[Tappa] Reinitialising after PIN cancel...');
+          TransactionService().completeError(
+            const _CancelledException(),
+          ); // ensure service cleans up
           _autoInit();
         } else {
           final failure = e is _PaymentException
@@ -1016,25 +993,12 @@ class _PaymentScreenState extends State<PaymentScreen> {
                   icon: Icons.block_rounded,
                   color: const Color(0xFFE74C3C),
                 );
-
-          _saveAtmTransaction(
-            status: 'failed',
-            amount: _rawAmount,
-            failureTitle: failure.title,
-            failureDetail: failure.detail,
-          );
-
-          _playFailureFeedback();
-
-          // Show failure screen — _txActive cleared in finally
           setState(() => _txFailure = failure);
         }
       }
     } finally {
-      // ── Always runs — single place to reset all transaction state ──────────
       _tagDetectionSub?.cancel();
       _tagDetectionSub = null;
-      _txCompleter = null;
       _isTransactionActive = false;
       _nfcStatusNotifier.add(null);
 
@@ -1044,7 +1008,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
           if (_txFailure != null) {
             _txStatus = _TxStatus.failed;
           } else if (_txStatus == _TxStatus.uncertain) {
-            // Keep uncertain — amount/rrn preserved so the screen can show them
+            // keep uncertain
           } else {
             _txStatus = _TxStatus.idle;
             _chargedAmount = '';
@@ -1058,17 +1022,10 @@ class _PaymentScreenState extends State<PaymentScreen> {
   @override
   void dispose() {
     debugPrint('[PaymentScreen] Disposing...');
-    _isDisposed = true;
     _lifecycleListener.dispose();
 
-    if (!_isTransactionActive) {
-      _stopNfc();
-    }
-
-    if (_txCompleter != null && !_txCompleter!.isCompleted) {
-      _txCompleter!.completeError(const _CancelledException());
-    }
-    _txCompleter = null;
+    // Do NOT stop NFC – let the native reader mode stay disabled, but keep the callback alive.
+    // The plugin is already initialized and the errorCallback will still work.
 
     _tagDetectionSub?.cancel();
     _tagDetectionSub = null;
@@ -1079,8 +1036,9 @@ class _PaymentScreenState extends State<PaymentScreen> {
     _amountFocus.dispose();
     _tagController.dispose();
     _initializing = false;
+    _isDisposed = true;
 
-    debugPrint('[PaymentScreen] Disposed + NFC stopped');
+    debugPrint('[PaymentScreen] Disposed (NFC callback preserved)');
     super.dispose();
   }
 
@@ -1101,20 +1059,10 @@ class _PaymentScreenState extends State<PaymentScreen> {
         errorCallback: (errorCode, errorMessage) async {
           debugPrint('[Tappa] CALLBACK: code=$errorCode message=$errorMessage');
 
-          if (_isDisposed) {
-            debugPrint('[Tappa] Callback ignored - widget disposed');
-            return;
-          }
-
-          if (_txCompleter == null) {
-            debugPrint('[Tappa] Callback ignored - no active transaction');
-            return;
-          }
-
+          // Handle initialization phase errors
           if (_initializing) {
             debugPrint('[Tappa] Init-phase error received via callback');
             final failure = _tappaFailure(errorCode, errorMessage);
-
             await _saveTappaLog(
               eventType: 'terminal_initialization',
               status: 'failed',
@@ -1122,7 +1070,6 @@ class _PaymentScreenState extends State<PaymentScreen> {
               errorMessage: errorMessage,
               additionalData: {'phase': 'initialization_callback'},
             );
-
             if (mounted) {
               setState(() {
                 _initializing = false;
@@ -1133,10 +1080,9 @@ class _PaymentScreenState extends State<PaymentScreen> {
             return;
           }
 
-          if (_txCompleter!.isCompleted) {
-            debugPrint(
-              '[Tappa] Callback received but transaction already completed',
-            );
+          // No active transaction? ignore
+          if (!TransactionService().hasPending) {
+            debugPrint('[Tappa] Callback ignored - no active transaction');
             return;
           }
 
@@ -1179,104 +1125,101 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
           if (isSuccess) {
             debugPrint('[Tappa] Transaction APPROVED - actual success');
-            // Buzz + ping to confirm card read
             _playCardDetectedFeedback();
-            // Signal dialog to show processing spinner with remaining seconds
             final elapsed = _txStartTime != null
                 ? DateTime.now().difference(_txStartTime!).inSeconds
                 : 0;
             final remaining = (90 - elapsed).clamp(5, 90);
             _nfcStatusNotifier.add('__processing__:$remaining');
-            _txCompleter!.complete(errorMessage);
-          } else {
-            debugPrint('[Tappa] Transaction FAILED');
-
-            // Code 32 can mean two very different things:
-            //   a) User cancelled from the Tappa PIN activity → no bank contact,
-            //      errorMessage is empty or has no bank data → treat as cancelled.
-            //   b) Real network drop AFTER the PIN was submitted to the bank →
-            //      errorMessage has a parsed response with statusCode/data →
-            //      treat as uncertain (customer may have been debited).
-            if (errorCode == 32) {
-              final hasBankContact = parsedResponse != null &&
-                  (parsedResponse['statusCode'] != null ||
-                   parsedResponse['data'] != null);
-
-              if (hasBankContact) {
-                debugPrint('[Tappa] ⚠️ Code 32 with bank response — pending outcome');
-                await _saveTappaLog(
-                  eventType: 'transaction_pending',
-                  status: 'pending',
-                  amount: _chargedAmount,
-                  rrn: _txRrn,
-                  errorCode: '32',
-                  errorMessage: 'Network error mid-transaction — payment status pending reconciliation',
-                  additionalData: {'statusCode': statusCode, 'full_response': errorMessage},
-                );
-                _nfcStatusNotifier.add('__uncertain__');
-                if (_txCompleter != null && !_txCompleter!.isCompleted) {
-                  _txCompleter!.completeError(const _UncertainException());
-                }
-              } else {
-                debugPrint('[Tappa] Code 32 with no bank data — treating as PIN cancel');
-                if (_txCompleter != null && !_txCompleter!.isCompleted) {
-                  _txCompleter!.completeError(const _CancelledException());
-                }
-              }
-              return;
-            }
-
-            String errorDetail = 'Transaction failed';
-
-            if (field39 != null && field39.isNotEmpty) {
-              errorDetail = _getField39Message(field39);
-              debugPrint('[Tappa] Using field39 ($field39): $errorDetail');
-            } else if (failureReason != null && failureReason.isNotEmpty) {
-              errorDetail = failureReason;
-              debugPrint('[Tappa] Using failureReason: $errorDetail');
-            } else if (parsedResponse != null) {
-              final dataObj = parsedResponse['data'] as Map<String, dynamic>?;
-              final message = parsedResponse['message'] as String?;
-              if (message != null && message.isNotEmpty) {
-                errorDetail = message;
-              } else if (dataObj?['description'] != null) {
-                errorDetail = dataObj!['description'].toString();
-              }
-            }
-
-            await _saveTappaLog(
-              eventType: 'transaction_failed',
-              status: 'failed',
-              amount: _chargedAmount,
-              rrn: _txRrn,
-              errorCode: errorCode.toString(),
-              errorMessage: errorDetail,
-              additionalData: {
-                'field39': field39,
-                'statusCode': statusCode,
-                'full_response': errorMessage,
-                'hard_failure': true,
-              },
-            );
-
-            // Signal dialog to show processing spinner before error screen appears
-            final elapsed2 = _txStartTime != null
-                ? DateTime.now().difference(_txStartTime!).inSeconds
-                : 0;
-            final remaining2 = (90 - elapsed2).clamp(5, 90);
-            _nfcStatusNotifier.add('__processing__:$remaining2');
-
-            _txCompleter!.completeError(
-              _PaymentException(
-                _TxFailure(
-                  title: _getFailureTitle(field39),
-                  detail: errorDetail,
-                  icon: Icons.block_rounded,
-                  color: const Color(0xFFE74C3C),
-                ),
-              ),
-            );
+            TransactionService().completeSuccess(errorMessage);
+            return;
           }
+
+          // Handle failures
+          debugPrint('[Tappa] Transaction FAILED');
+
+          // Code 32: uncertain or cancelled
+          if (errorCode == 32) {
+            final hasBankContact =
+                parsedResponse != null &&
+                (parsedResponse['statusCode'] != null ||
+                    parsedResponse['data'] != null);
+            if (hasBankContact) {
+              debugPrint(
+                '[Tappa] ⚠️ Code 32 with bank response — pending outcome',
+              );
+              await _saveTappaLog(
+                eventType: 'transaction_pending',
+                status: 'pending',
+                amount: _chargedAmount,
+                rrn: _txRrn,
+                errorCode: '32',
+                errorMessage:
+                    'Network error mid-transaction — payment status pending reconciliation',
+                additionalData: {
+                  'statusCode': statusCode,
+                  'full_response': errorMessage,
+                },
+              );
+              _nfcStatusNotifier.add('__uncertain__');
+              TransactionService().completeError(const _UncertainException());
+            } else {
+              debugPrint(
+                '[Tappa] Code 32 with no bank data — treating as PIN cancel',
+              );
+              TransactionService().completeError(const _CancelledException());
+            }
+            return;
+          }
+
+          String errorDetail = 'Transaction failed';
+          if (field39 != null && field39.isNotEmpty) {
+            errorDetail = _getField39Message(field39);
+            debugPrint('[Tappa] Using field39 ($field39): $errorDetail');
+          } else if (failureReason != null && failureReason.isNotEmpty) {
+            errorDetail = failureReason;
+            debugPrint('[Tappa] Using failureReason: $errorDetail');
+          } else if (parsedResponse != null) {
+            final dataObj = parsedResponse['data'] as Map<String, dynamic>?;
+            final message = parsedResponse['message'] as String?;
+            if (message != null && message.isNotEmpty) {
+              errorDetail = message;
+            } else if (dataObj?['description'] != null) {
+              errorDetail = dataObj!['description'].toString();
+            }
+          }
+
+          await _saveTappaLog(
+            eventType: 'transaction_failed',
+            status: 'failed',
+            amount: _chargedAmount,
+            rrn: _txRrn,
+            errorCode: errorCode.toString(),
+            errorMessage: errorDetail,
+            additionalData: {
+              'field39': field39,
+              'statusCode': statusCode,
+              'full_response': errorMessage,
+              'hard_failure': true,
+            },
+          );
+
+          final elapsed2 = _txStartTime != null
+              ? DateTime.now().difference(_txStartTime!).inSeconds
+              : 0;
+          final remaining2 = (90 - elapsed2).clamp(5, 90);
+          _nfcStatusNotifier.add('__processing__:$remaining2');
+
+          TransactionService().completeError(
+            _PaymentException(
+              _TxFailure(
+                title: _getFailureTitle(field39),
+                detail: errorDetail,
+                icon: Icons.block_rounded,
+                color: const Color(0xFFE74C3C),
+              ),
+            ),
+          );
         },
         isSandBoxMode: false,
       );
@@ -1413,7 +1356,9 @@ class _PaymentScreenState extends State<PaymentScreen> {
       }
 
       if ((merchantVa['id'] as String? ?? '').isEmpty) {
-        throw Exception('Merchant account ID is empty. Full VA map: $merchantVa');
+        throw Exception(
+          'Merchant account ID is empty. Full VA map: $merchantVa',
+        );
       }
 
       _companyVa = companyVa;
@@ -1455,15 +1400,19 @@ class _PaymentScreenState extends State<PaymentScreen> {
       return id;
     }
 
-    final createCp = await callCloudFunctionLogged('sudoCreateCounterparty', source: 'business_app', payload: {
-          'accountId': companyVa['id'],
-          'bankId': merchantBankId,
-          'accountType': companyVa['type'],
-          'accountName': merchantAccountName,
-          'bankName': merchantBankName,
-          'accountNumber': merchantAccountNumber,
-          'bankCode': merchantBankId,
-        });
+    final createCp = await callCloudFunctionLogged(
+      'safehavenCreateCounterparty',
+      source: 'business_app',
+      payload: {
+        'accountId': companyVa['id'],
+        'bankId': merchantBankId,
+        'accountType': companyVa['type'],
+        'accountName': merchantAccountName,
+        'bankName': merchantBankName,
+        'accountNumber': merchantAccountNumber,
+        'bankCode': merchantBankId,
+      },
+    );
 
     debugPrint('[Settlement] createCounterparty response: ${createCp.data}');
 
@@ -1627,16 +1576,23 @@ class _PaymentScreenState extends State<PaymentScreen> {
       final idempotencyKey = const Uuid().v4();
 
       // Book transfer: company VA → merchant VA (both on Sudo)
-      final result = await callCloudFunctionLogged('sudoTransferIntra', source: 'business_app', payload: {
-            'fromAccountId': companyVa['id'],
-            'toAccountId': merchantVa['id'],
-            'amount': amountKobo,
-            'currency': 'NGN',
-            'narration': narration,
-            'idempotencyKey': idempotencyKey,
-          });
+      final result = await callCloudFunctionLogged(
+        'safehavenTransferIntra',
+        source: 'business_app',
+        payload: {
+          'fromAccountId': companyVa['id'],
+          'toAccountId': merchantVa['id'],
+          'amount': amountKobo,
+          'currency': 'NGN',
+          'type': 'va_settlement',
+          'narration': narration,
+          'idempotencyKey': idempotencyKey,
+        },
+      );
 
-      debugPrint('[Settlement] sudoTransferIntra response: ${result.data}');
+      debugPrint(
+        '[Settlement] safehavenTransferIntra response: ${result.data}',
+      );
 
       final dynamic responseData = result.data;
       Map<String, dynamic>? parsedResponse;
@@ -1699,6 +1655,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
           'userId': FirebaseAuth.instance.currentUser?.uid,
           'type': 'va_settlement_failed',
           'amount': amountNaira,
+          'isInternal': true,
           'rrn': rrn,
           'reference': transferId,
           'status': 'failed',
@@ -1725,6 +1682,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
         'type': 'va_settlement',
         'amount': amountNaira,
         'rrn': rrn,
+        'isInternal': true,
         'reference': transferId,
         'status': 'success',
         'currency': 'NGN',
@@ -1789,24 +1747,26 @@ class _PaymentScreenState extends State<PaymentScreen> {
   }) async {
     try {
       final user = FirebaseAuth.instance.currentUser;
-      final docRef = await FirebaseFirestore.instance.collection('transactions').add({
-        'userId': user?.uid,
-        'type': 'atm_payment',
-        'amount': _rawAmount,
-        'rrn': _txRrn,
-        'reference': _txRrn,
-        if (_safeHavenRrn.isNotEmpty) 'safeHavenRrn': _safeHavenRrn,
-        'terminalId': _kTerminalId,
-        'status': status,
-        'currency': 'NGN',
-        if (feesKobo != null) 'padipay_fee_kobo': feesKobo,
-        if (feesKobo != null) 'padipay_fee_naira': feesKobo / 100.0,
-        if (cardData != null) 'cardData': cardData,
-        if (failureTitle != null) 'failureTitle': failureTitle,
-        if (failureDetail != null) 'failureDetail': failureDetail,
-        if (tag != null && tag.isNotEmpty) 'tag': tag,
-        'timestamp': FieldValue.serverTimestamp(),
-      });
+      final docRef = await FirebaseFirestore.instance
+          .collection('transactions')
+          .add({
+            'userId': user?.uid,
+            'type': 'atm_payment',
+            'amount': _rawAmount,
+            'rrn': _txRrn,
+            'reference': _txRrn,
+            if (_safeHavenRrn.isNotEmpty) 'safeHavenRrn': _safeHavenRrn,
+            'terminalId': _kTerminalId,
+            'status': status,
+            'currency': 'NGN',
+            if (feesKobo != null) 'padipay_fee_kobo': feesKobo,
+            if (feesKobo != null) 'padipay_fee_naira': feesKobo / 100.0,
+            if (cardData != null) 'cardData': cardData,
+            if (failureTitle != null) 'failureTitle': failureTitle,
+            if (failureDetail != null) 'failureDetail': failureDetail,
+            if (tag != null && tag.isNotEmpty) 'tag': tag,
+            'timestamp': FieldValue.serverTimestamp(),
+          });
       _txDocId = docRef.id;
       debugPrint('[Tappa] Saved ATM transaction docId=${docRef.id}');
     } catch (e) {
@@ -1823,19 +1783,23 @@ class _PaymentScreenState extends State<PaymentScreen> {
     });
     try {
       final rrnToUse = _safeHavenRrn.isNotEmpty ? _safeHavenRrn : _txRrn;
-      debugPrint('[Reconcile] Reconciling current tx rrnToUse=$rrnToUse (safeHavenRrn=$_safeHavenRrn appRrn=$_txRrn) docId=$_txDocId');
+      debugPrint(
+        '[Reconcile] Reconciling current tx rrnToUse=$rrnToUse (safeHavenRrn=$_safeHavenRrn appRrn=$_txRrn) docId=$_txDocId',
+      );
       final result = await FirebaseFunctions.instance
           .httpsCallable('reconcileAtmTransaction')
           .call({
-        'rrn': rrnToUse,
-        if (_txDocId != null) 'transactionDocId': _txDocId,
-      });
+            'rrn': rrnToUse,
+            if (_txDocId != null) 'transactionDocId': _txDocId,
+          });
       debugPrint('[Reconcile] Raw response for rrn=$_txRrn: ${result.data}');
       final resultMap = result.data as Map? ?? {};
       final status = resultMap['status'] as String? ?? 'pending';
       final responseCode = resultMap['responseCode'];
       final safeHavenStatus = resultMap['safeHavenStatus'];
-      debugPrint('[Reconcile] rrn=$_txRrn → status=$status | responseCode=$responseCode | safeHavenStatus=$safeHavenStatus');
+      debugPrint(
+        '[Reconcile] rrn=$_txRrn → status=$status | responseCode=$responseCode | safeHavenStatus=$safeHavenStatus',
+      );
       if (mounted) {
         setState(() {
           _isReconciling = false;
@@ -1867,15 +1831,15 @@ class _PaymentScreenState extends State<PaymentScreen> {
           .doc(user.uid)
           .collection('entries')
           .add({
-        'label': label,
-        'category': 'income',
-        'amount': amount,
-        'note': '',
-        'date': Timestamp.now(),
-        'isManual': false,
-        'transactionId': rrn,
-        'transactionTitle': 'NFC Card Payment',
-      });
+            'label': label,
+            'category': 'income',
+            'amount': amount,
+            'note': '',
+            'date': Timestamp.now(),
+            'isManual': false,
+            'transactionId': rrn,
+            'transactionTitle': 'NFC Card Payment',
+          });
     } catch (e) {
       debugPrint('[Tappa] PadiBook save failed: $e');
     }
@@ -1919,7 +1883,8 @@ class _PaymentScreenState extends State<PaymentScreen> {
       onPopInvokedWithResult: (didPop, result) async {
         if (didPop) {
           await _stopNfc();
-        } else if (inResultScreen) {
+        } else if (!didPop && _txStatus != _TxStatus.idle) {
+          // When on result screen (failed/uncertain) and back pressed, reset
           _resetTransaction();
         }
       },
@@ -2063,7 +2028,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
                     ),
                   ),
 
-                   SizedBox(height: MediaQuery.of(context).size.height * 0.1),
+                  SizedBox(height: MediaQuery.of(context).size.height * 0.1),
                   // Optional tag field
                   TextField(
                     controller: _tagController,
@@ -2072,12 +2037,22 @@ class _PaymentScreenState extends State<PaymentScreen> {
                     textCapitalization: TextCapitalization.sentences,
                     decoration: InputDecoration(
                       hintText: 'What is this for? (optional)',
-                      hintStyle: TextStyle(fontSize: 13, color: Colors.grey.shade400),
-                      prefixIcon: Icon(Icons.label_outline_rounded, size: 18, color: Colors.grey.shade400),
+                      hintStyle: TextStyle(
+                        fontSize: 13,
+                        color: Colors.grey.shade400,
+                      ),
+                      prefixIcon: Icon(
+                        Icons.label_outline_rounded,
+                        size: 18,
+                        color: Colors.grey.shade400,
+                      ),
                       counterText: '',
                       filled: true,
                       fillColor: Colors.grey.shade50,
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 12,
+                      ),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
                         borderSide: BorderSide(color: Colors.grey.shade200),
@@ -2094,7 +2069,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
                     style: const TextStyle(fontSize: 13),
                   ),
                   SizedBox(height: MediaQuery.of(context).size.height * 0.05),
-                
+
                   const Text(
                     'Enter the amount to charge',
                     style: TextStyle(fontSize: 13, color: Colors.grey),
@@ -2190,8 +2165,9 @@ class _PaymentScreenState extends State<PaymentScreen> {
                           ? Colors.red.shade600
                           : Colors.grey.shade400,
                     ),
-                  ),SizedBox(height: MediaQuery.of( context).size.height * 0.2)
-                 ],
+                  ),
+                  SizedBox(height: MediaQuery.of(context).size.height * 0.2),
+                ],
               ),
             ),
           ),
@@ -2300,24 +2276,37 @@ class _PaymentScreenState extends State<PaymentScreen> {
           const SizedBox(height: 16),
           const SizedBox(height: 24),
           Container(
-            width: 100, height: 100,
+            width: 100,
+            height: 100,
             decoration: BoxDecoration(
               color: Color(0xFFFFF3E0),
               shape: BoxShape.circle,
             ),
-            child: const Icon(Icons.wifi_off_rounded, size: 52, color: Color(0xFFF57C00)),
+            child: const Icon(
+              Icons.wifi_off_rounded,
+              size: 52,
+              color: Color(0xFFF57C00),
+            ),
           ),
           const SizedBox(height: 24),
           const Text(
             'Connection Lost',
-            style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, letterSpacing: -0.3),
+            style: TextStyle(
+              fontSize: 24,
+              fontWeight: FontWeight.bold,
+              letterSpacing: -0.3,
+            ),
             textAlign: TextAlign.center,
           ),
           const SizedBox(height: 12),
           Text(
             'The network dropped while processing the payment.\nStatus will be reconciled automatically. Pull down to refresh anytime.',
             textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 14, color: Colors.grey.shade600, height: 1.55),
+            style: TextStyle(
+              fontSize: 14,
+              color: Colors.grey.shade600,
+              height: 1.55,
+            ),
           ),
           const SizedBox(height: 20),
           Container(
@@ -2328,13 +2317,27 @@ class _PaymentScreenState extends State<PaymentScreen> {
               borderRadius: BorderRadius.circular(12),
               border: Border.all(color: const Color(0xFFF9A825)),
             ),
-            child: Column(children: [
-              Text('Transaction Reference (RRN)',
-                  style: TextStyle(fontSize: 11, color: Colors.orange.shade800, fontWeight: FontWeight.w500)),
-              const SizedBox(height: 4),
-              Text(_txRrn,
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17, letterSpacing: 2)),
-            ]),
+            child: Column(
+              children: [
+                Text(
+                  'Transaction Reference (RRN)',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Colors.orange.shade800,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _txRrn,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 17,
+                    letterSpacing: 2,
+                  ),
+                ),
+              ],
+            ),
           ),
           const SizedBox(height: 16),
           // ── Reconcile result banner ─────────────────────────────────────
@@ -2346,15 +2349,15 @@ class _PaymentScreenState extends State<PaymentScreen> {
                 color: _reconcileResult == 'success'
                     ? const Color(0xFFE8F5E9)
                     : _reconcileResult == 'failed'
-                        ? const Color(0xFFFFEBEE)
-                        : const Color(0xFFFFF9C4),
+                    ? const Color(0xFFFFEBEE)
+                    : const Color(0xFFFFF9C4),
                 borderRadius: BorderRadius.circular(12),
                 border: Border.all(
                   color: _reconcileResult == 'success'
                       ? const Color(0xFF4CAF50)
                       : _reconcileResult == 'failed'
-                          ? const Color(0xFFE74C3C)
-                          : const Color(0xFFF9A825),
+                      ? const Color(0xFFE74C3C)
+                      : const Color(0xFFF9A825),
                 ),
               ),
               child: Row(
@@ -2363,13 +2366,13 @@ class _PaymentScreenState extends State<PaymentScreen> {
                     _reconcileResult == 'success'
                         ? Icons.check_circle_rounded
                         : _reconcileResult == 'failed'
-                            ? Icons.cancel_rounded
-                            : Icons.help_outline_rounded,
+                        ? Icons.cancel_rounded
+                        : Icons.help_outline_rounded,
                     color: _reconcileResult == 'success'
                         ? const Color(0xFF4CAF50)
                         : _reconcileResult == 'failed'
-                            ? const Color(0xFFE74C3C)
-                            : const Color(0xFFF9A825),
+                        ? const Color(0xFFE74C3C)
+                        : const Color(0xFFF9A825),
                     size: 22,
                   ),
                   const SizedBox(width: 10),
@@ -2378,18 +2381,18 @@ class _PaymentScreenState extends State<PaymentScreen> {
                       _reconcileResult == 'success'
                           ? 'Payment confirmed — the customer was debited. Settlement will proceed.'
                           : _reconcileResult == 'failed'
-                              ? 'Payment failed — the customer was NOT debited.'
-                              : _reconcileResult == 'error'
-                                  ? 'Could not reach network. Pull down to refresh and try again.'
-                                  : 'Status still pending — pull down to refresh.',
+                          ? 'Payment failed — the customer was NOT debited.'
+                          : _reconcileResult == 'error'
+                          ? 'Could not reach network. Pull down to refresh and try again.'
+                          : 'Status still pending — pull down to refresh.',
                       style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w500,
                         color: _reconcileResult == 'success'
                             ? const Color(0xFF2E7D32)
                             : _reconcileResult == 'failed'
-                                ? const Color(0xFFC62828)
-                                : const Color(0xFFE65100),
+                            ? const Color(0xFFC62828)
+                            : const Color(0xFFE65100),
                         height: 1.45,
                       ),
                     ),
@@ -2426,7 +2429,11 @@ class _PaymentScreenState extends State<PaymentScreen> {
               child: const Text(
                 'Start New Transaction',
                 textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
               ),
             ),
           ),
@@ -2569,7 +2576,8 @@ class _NfcTapDialogState extends State<_NfcTapDialog> {
     super.initState();
     _sub = widget.statusStream.listen((msg) {
       if (!mounted) return;
-      if (msg != null && (msg.startsWith('__processing__') || msg == '__uncertain__')) {
+      if (msg != null &&
+          (msg.startsWith('__processing__') || msg == '__uncertain__')) {
         int start = 90;
         if (msg.contains(':')) {
           start = int.tryParse(msg.split(':')[1]) ?? 90;
@@ -2615,7 +2623,6 @@ class _NfcTapDialogState extends State<_NfcTapDialog> {
   Widget build(BuildContext context) {
     final hasError = _retryMessage != null;
 
-    // Block back-gesture while processing or reading so dialog can't dismiss
     return PopScope(
       canPop: !_isProcessing && !_isReadingCard,
       child: AlertDialog(
@@ -2716,9 +2723,7 @@ class _NfcTapDialogState extends State<_NfcTapDialog> {
                   letterSpacing: 0.5,
                 ),
               ),
-
               const SizedBox(height: 8),
-
               Text(
                 hasError
                     ? _retryMessage!
@@ -2730,12 +2735,9 @@ class _NfcTapDialogState extends State<_NfcTapDialog> {
                   height: 1.5,
                 ),
               ),
-
               const SizedBox(height: 24),
-
               const LinearProgressIndicator(),
               const SizedBox(height: 24),
-
               InkWell(
                 onTap: () {
                   if (Navigator.of(context).canPop()) {

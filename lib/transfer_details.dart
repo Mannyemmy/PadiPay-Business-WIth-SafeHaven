@@ -171,7 +171,7 @@ class _AddViaBankTransferState extends State<AddViaBankTransfer> {
                                 style: const TextStyle(
                                   color: Colors.black54,
                                   fontWeight: FontWeight.w700,
-                                  fontSize: 15,
+                                  fontSize: 12,
                                 ),
                               ),
                             ],
@@ -212,7 +212,7 @@ class _AddViaBankTransferState extends State<AddViaBankTransfer> {
                                 style: const TextStyle(
                                   color: Colors.black54,
                                   fontWeight: FontWeight.w700,
-                                  fontSize: 15,
+                                  fontSize: 12,
                                 ),
                               ),
                             ],
@@ -255,7 +255,7 @@ class _AddViaBankTransferState extends State<AddViaBankTransfer> {
                                 style: const TextStyle(
                                   color: Colors.black54,
                                   fontWeight: FontWeight.w700,
-                                  fontSize: 15,
+                                  fontSize: 12,
                                 ),
                               ),
                             ],

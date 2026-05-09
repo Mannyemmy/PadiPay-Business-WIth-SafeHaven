@@ -193,11 +193,15 @@ class _FundCardState extends State<FundCard> {
       if (user == null) throw Exception('User not logged in');
 
       userDetails = await getCurrentAccountIdAndType();
-      final String? accountId = userDetails['accountId'];
-      final String? accountType = userDetails['accountType'];
-      final String? bankId = userDetails['bankId'];
+      final String senderAccountId = userDetails['accountId']?.toString() ?? '';
+      final String senderAccountNumber = userDetails['accountNumber']?.toString() ?? '';
+      final String fromAccountId = senderAccountId.isNotEmpty
+          ? senderAccountId
+          : senderAccountNumber;
+      final String? accountType = userDetails['accountType']?.toString();
+      final String? bankId = userDetails['bankId']?.toString();
 
-      if (accountId == null || accountType == null || bankId == null) {
+      if (fromAccountId.isEmpty || accountType == null || bankId == null) {
         throw Exception('Account details not found');
       }
 
@@ -205,14 +209,18 @@ class _FundCardState extends State<FundCard> {
       if (companyVa == null) throw Exception('Company account not found');
 
       // Transfer total NGN to company VA (book transfer — both on Sudo)
-      final transferResult = await callCloudFunctionLogged('sudoTransferIntra', source: 'business_app', payload: {
-            'fromAccountId': accountId,
-            'toAccountId': companyVa['id'],
-            'amount': (totalAmount * 100).toInt(),
-            'currency': 'NGN',
-            'narration': 'Card Funding - ${widget.currency}',
-            'idempotencyKey': const Uuid().v4(),
-          });
+      final transferResult = await callCloudFunctionLogged(
+        'sudoTransferIntra',
+        source: 'business_app',
+        payload: {
+          'fromAccountId': fromAccountId,
+          'toAccountId': companyVa['id'],
+          'amount': (totalAmount * 100).toInt(),
+          'currency': 'NGN',
+          'narration': 'Card Funding - ${widget.currency}',
+          'idempotencyKey': const Uuid().v4(),
+        },
+      );
 
       if (transferResult.data['data']['attributes']['status'] == 'FAILED') {
         throw Exception('Transfer failed');

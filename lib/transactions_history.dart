@@ -39,7 +39,7 @@ class _TransactionsHistoryState extends State<TransactionsHistory> {
   DateTime? _customEndDate;
   bool _showCustomDateRange = false;
   final TextEditingController _searchController = TextEditingController();
-  bool _filtersExpanded = false;
+  bool _filtersExpanded = true;
   List<String> _searchSuggestions = [];
   bool _showSuggestions = false;
   final FocusNode _searchFocusNode = FocusNode();
@@ -745,8 +745,10 @@ class _TransactionsHistoryState extends State<TransactionsHistory> {
 
             final filteredDocs = snap.docs.where((doc) {
               final data = doc.data();
-              final type = data['type'];
-              return !excludedTypes.contains(type);
+              // Filter out by type OR by isInternal flag (catches old docs too)
+              if (excludedTypes.contains(data['type'])) return false;
+              if (data['isInternal'] == true) return false;
+              return true;
             }).toList();
 
             setState(() {
@@ -815,14 +817,12 @@ class _TransactionsHistoryState extends State<TransactionsHistory> {
                 .whereType<String>()
                 .where((id) => id.isNotEmpty)
                 .toList();
-            userAccountId =
-                getVirtualAccountData(data)?['id']?.toString();
+            userAccountId = getVirtualAccountData(data)?['id']?.toString();
             print('posStandAccountIds: $posStandAccountIds');
             print('userAccountId: $userAccountId');
           } else {
             // Regular user with business doc
-            userAccountId =
-                getVirtualAccountData(data)?['id']?.toString();
+            userAccountId = getVirtualAccountData(data)?['id']?.toString();
           }
           setState(() {});
         } else {
@@ -849,8 +849,14 @@ class _TransactionsHistoryState extends State<TransactionsHistory> {
         )
         .snapshots()
         .listen((snap) {
+          const excludedTypes = {'va_settlement', 'va_settlement_failed'};
           setState(() {
-            receivedCpDocs = snap.docs;
+            receivedCpDocs = snap.docs.where((doc) {
+              final data = doc.data();
+              if (excludedTypes.contains(data['type'])) return false;
+              if (data['isInternal'] == true) return false;
+              return true;
+            }).toList();
             _updateAllTransactionData();
           });
         });
@@ -978,7 +984,6 @@ class _TransactionsHistoryState extends State<TransactionsHistory> {
                             return;
                           }
 
-                        
                           if (index == 2) {
                             navigateTo(
                               context,
@@ -1768,11 +1773,11 @@ class _TransactionsHistoryState extends State<TransactionsHistory> {
                                   'MMMM d, yyyy',
                                 ).format(date);
                                 final initialName =
-                                  data['senderName'] ??
-                                  data['senderAccountName'] ??
-                                  data['originatorName'] ??
-                                  data['nameEnquiry']?['accountName'] ??
-                                  data['api_response']?['data']?['attributes']?['nameEnquiry']?['accountName'] ??
+                                    data['senderName'] ??
+                                    data['senderAccountName'] ??
+                                    data['originatorName'] ??
+                                    data['nameEnquiry']?['accountName'] ??
+                                    data['api_response']?['data']?['attributes']?['nameEnquiry']?['accountName'] ??
                                     data['recipientName'] ??
                                     data['phoneNumber'] ??
                                     data['meterNumber'] ??
@@ -1791,7 +1796,20 @@ class _TransactionsHistoryState extends State<TransactionsHistory> {
                                         as String?) ??
                                     (data['transactionId'] as String?) ??
                                     '';
-
+                                Map<String, dynamic>? cardDataForItem;
+                                if (type == 'atm_payment') {
+                                  cardDataForItem = {
+                                    'type': type,
+                                    'amount': data['amount'],
+                                    'merchant': data['tag'] ?? 'Card Payment',
+                                    'channel': 'NFC',
+                                    'currency': data['currency'] ?? 'NGN',
+                                    'timestamp': data['timestamp'],
+                                    'reference':
+                                        data['reference'] ?? data['rrn'] ?? '',
+                                    'status': data['status'] ?? 'success',
+                                  };
+                                }
                                 return TransactionItem(
                                   docId: doc.id,
                                   icon: icon,
@@ -1809,6 +1827,7 @@ class _TransactionsHistoryState extends State<TransactionsHistory> {
                                   bgColor: bgColor,
                                   iconColor: iconColor,
                                   offset: offset,
+                                  cardData: cardDataForItem,
                                 );
                               },
                             );
@@ -1904,6 +1923,7 @@ class TransactionItem extends StatefulWidget {
   final Color bgColor;
   final Color iconColor;
   final Offset offset;
+  final Map<String, dynamic>? cardData;
 
   const TransactionItem({
     super.key,
@@ -1923,6 +1943,7 @@ class TransactionItem extends StatefulWidget {
     required this.bgColor,
     required this.iconColor,
     required this.offset,
+    this.cardData,
   });
 
   @override
@@ -1994,24 +2015,133 @@ class _TransactionItemState extends State<TransactionItem> {
       case 'loans':
         return isOutgoing ? 'Loan Disbursed' : 'Loan Received';
       case 'ghost_transfer':
-        return 'Ghost Transfer';
-
+        return "Ghost Transfer";
       case 'anonymous_transfer':
         return 'Anonymous Transfer';
       case 'bill_payment':
         return 'Bill Payment for $otherName';
-      case 'va_settlement':
-        return 'ATM Settlement';
-      case 'va_settlement_failed':
-        return 'ATM Settlement';
       case 'atm_payment':
-        return 'ATM Payment';
-
+        return 'Card Payment';
+      case 'card_debit':
+        return 'Virtual Card Payment at $otherName';
+      case 'card_declined':
+        return 'Virtual Card Payment at $otherName';
+      case 'card_refund':
+        return 'Card Refund from $otherName';
+      case 'cashback_earned':
+        return 'Cashback Earned';
+      case 'cashback_spent':
+        return 'Cashback Spent';
       default:
         return otherName != 'Unknown'
             ? '$type for $otherName'
             : type.toUpperCase();
     }
+  }
+
+  void _showCardDetail(BuildContext context) {
+    final data = widget.cardData!;
+    final type = data['type']?.toString() ?? '';
+    final currency = data['currency']?.toString() ?? 'NGN';
+    final merchant = data['merchant']?.toString() ?? 'Unknown';
+    final channel = data['channel']?.toString() ?? '';
+    final reference = data['reference']?.toString() ?? '';
+    final status =
+        data['status']?.toString() ??
+        (type == 'card_declined' ? 'declined' : 'approved');
+    final ts = data['timestamp'] as Timestamp?;
+    final date = ts != null
+        ? DateFormat('dd MMM yyyy, hh:mm a').format(ts.toDate())
+        : '';
+    final isDeclined = type == 'card_declined' || status == 'declined';
+    final isRefund = type == 'card_refund';
+    final statusLabel = isDeclined
+        ? 'Declined'
+        : isRefund
+        ? 'Refunded'
+        : 'Successful';
+    final statusColor = isDeclined
+        ? Colors.red
+        : isRefund
+        ? Colors.blue
+        : Colors.green;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              widget.amount,
+              style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 4),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: statusColor.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                statusLabel,
+                style: GoogleFonts.inter(
+                  color: statusColor,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            _detailRow('Merchant', merchant),
+            if (channel.isNotEmpty)
+              _detailRow('Channel', channel.toUpperCase()),
+            _detailRow('Currency', currency),
+            if (date.isNotEmpty) _detailRow('Date', date),
+            if (reference.isNotEmpty) _detailRow('Reference', reference),
+            if (data['reason'] != null)
+              _detailRow('Reason', data['reason'].toString()),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _detailRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            label,
+            style: GoogleFonts.inter(color: Colors.grey.shade600, fontSize: 13),
+          ),
+          Flexible(
+            child: Text(
+              value,
+              style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+              textAlign: TextAlign.end,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -2023,12 +2153,12 @@ class _TransactionItemState extends State<TransactionItem> {
       onTap: () {
         navigateTo(
           context,
-          ReceiptPage(reference: widget.reference),
+          ReceiptPage(reference: widget.reference, cardData: widget.cardData),
           type: NavigationType.push,
         );
       },
       child: Container(
-        margin: const EdgeInsets.only(bottom: 12),
+        margin: const EdgeInsets.only(bottom: 12, left: 0, right: 0),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
           color: Colors.white,
@@ -2045,11 +2175,11 @@ class _TransactionItemState extends State<TransactionItem> {
         child: Row(
           children: [
             CircleAvatar(
-              radius: 22,
+              radius: 20,
               backgroundColor: widget.bgColor,
               child: Transform.translate(
                 offset: widget.offset,
-                child: Icon(widget.icon, color: widget.iconColor, size: 18),
+                child: Icon(widget.icon, color: widget.iconColor, size: 16),
               ),
             ),
             const SizedBox(width: 14),
@@ -2059,9 +2189,9 @@ class _TransactionItemState extends State<TransactionItem> {
                 children: [
                   Text(
                     title,
-                    style: const TextStyle(
+                    style: GoogleFonts.inter(
                       fontWeight: FontWeight.w700,
-                      fontSize: 15,
+                      fontSize: 12,
                       color: Colors.black87,
                     ),
                     maxLines: 1,
@@ -2073,32 +2203,31 @@ class _TransactionItemState extends State<TransactionItem> {
                       Icon(
                         Icons.access_time,
                         color: Colors.grey.shade500,
-                        size: 13,
+                        size: 10,
                       ),
                       const SizedBox(width: 4),
                       Text(
                         widget.formattedTime,
-                        style: TextStyle(
+                        style: GoogleFonts.inter(
                           color: Colors.grey.shade600,
-                          fontSize: 12,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w500,
                         ),
                       ),
                       Text(
-                        ' - ',
-                        style: TextStyle(
+                        ' • ',
+                        style: GoogleFonts.inter(
                           color: Colors.grey.shade400,
-                          fontSize: 12,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w500,
                         ),
                       ),
-                      Expanded(
-                        child: Text(
-                          widget.formattedDate,
-                          style: TextStyle(
-                            color: Colors.grey.shade600,
-                            fontSize: 12,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                      Text(
+                        widget.formattedDate,
+                        style: GoogleFonts.inter(
+                          color: Colors.grey.shade600,
+                          fontSize: 10,
+                          fontWeight: FontWeight.w500,
                         ),
                       ),
                     ],
@@ -2112,19 +2241,19 @@ class _TransactionItemState extends State<TransactionItem> {
               children: [
                 Text(
                   widget.amount,
-                  style: TextStyle(
+                  style: GoogleFonts.inter(
                     fontWeight: FontWeight.w700,
-                    fontSize: 14,
+                    fontSize: 12,
                     color: widget.amountColor,
                   ),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   widget.status,
-                  style: TextStyle(
+                  style: GoogleFonts.inter(
                     color: widget.statusColor,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
+                    fontSize: 10,
+                    fontWeight: FontWeight.w400,
                   ),
                 ),
               ],

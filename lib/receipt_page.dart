@@ -1,11 +1,12 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'dart:io';
-import 'dart:convert';                    // ← Required for cardData parsing
-
+import 'package:confetti/confetti.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:padi_pay_business/utils.dart';
 import 'package:path_provider/path_provider.dart';
@@ -15,12 +16,12 @@ import 'package:share_plus/share_plus.dart';
 import 'package:vector_math/vector_math_64.dart' as vm;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:shimmer/shimmer.dart';
 
 class ReceiptPage extends StatefulWidget {
   final String reference;
+  final Map<String, dynamic>? cardData;
 
-  const ReceiptPage({super.key, required this.reference});
+  const ReceiptPage({super.key, required this.reference, this.cardData});
 
   @override
   State<ReceiptPage> createState() => _ReceiptPageState();
@@ -28,389 +29,522 @@ class ReceiptPage extends StatefulWidget {
 
 class _ReceiptPageState extends State<ReceiptPage> {
   final GlobalKey _boundaryKey = GlobalKey();
-  bool _isLoading = true;
+  late ConfettiController _confettiController;
 
+  // Receipt data state
+  bool isLoadingDetails = true;
   String transactionNo = '';
   String senderName = '';
   String senderAccountNumber = '';
   String senderBankName = '';
   String amount = '';
+  String principalAmount = '';
+  double? _fees;
+  double? _vat;
+  double? _stampDuty;
+  double? _totalAmount;
   String status = '';
   String transactionDateTime = '';
   String transactionType = '';
-  String? failureReason;
-
   List<Map<String, String>> recipientDetails = [];
   List<Map<String, String>> senderDetails = [];
   List<Map<String, String>> transactionInfo = [];
-  List<Map<String, String>> cardDetails = [];           // ← NEW for atm_payment
 
-  String _firstNonEmpty(List<dynamic> values, {String fallback = ''}) {
-    for (final value in values) {
-      final text = (value ?? '').toString().trim();
-      if (text.isNotEmpty && text.toLowerCase() != 'null') {
-        return text;
-      }
-    }
-    return fallback;
-  }
+  // For stream subscription and timeout
+  Stream<DocumentSnapshot?>? _transactionStream;
+  bool _hasTimedOut = false;
 
   @override
   void initState() {
     super.initState();
+    _confettiController = ConfettiController(
+      duration: const Duration(seconds: 5),
+    );
+    _confettiController.play();
+
     _generateTransactionIds();
-    _fetchTransactionDetails();
-  }
 
-  // ---------------------------------------------------------------------------
-  // Parse cardData JSON → first 4 + last 4 digits
-  // ---------------------------------------------------------------------------
-  List<Map<String, String>> _parseCardDetails(String? cardDataStr) {
-    if (cardDataStr == null || cardDataStr.isEmpty) {
-      return [{'label': 'Card Number', 'value': '•••• •••• •••• ••••'}];
-    }
-    try {
-      final decoded = jsonDecode(cardDataStr) as Map<String, dynamic>;
-      final responseData = decoded['data'] as Map<String, dynamic>? ?? decoded;
-
-      String maskedPan = responseData['maskedPan']?.toString() ??
-          responseData['pan']?.toString() ??
-          responseData['cardNumber']?.toString() ??
-          responseData['field2']?.toString() ?? '';
-
-      if (maskedPan.isNotEmpty && (maskedPan.length == 16 || maskedPan.length == 19)) {
-        final first4 = maskedPan.substring(0, 4);
-        final last4 = maskedPan.substring(maskedPan.length - 4);
-        maskedPan = '$first4 **** **** $last4';
-      }
-
-      final cardType = responseData['cardType']?.toString() ??
-          responseData['scheme']?.toString() ??
-          responseData['brand']?.toString() ??
-          responseData['cardBrand']?.toString() ??
-          'Debit Card';
-
-      return [
-        if (maskedPan.isNotEmpty) {'label': 'Card Number', 'value': maskedPan},
-        {'label': 'Card Type', 'value': cardType},
-      ];
-    } catch (e) {
-      debugPrint('Card data parse error: $e');
-      return [{'label': 'Card Number', 'value': '•••• •••• •••• ••••'}];
+    if (widget.cardData != null) {
+      // Card transactions are synchronous – no need for stream
+      _populateFromCardData(widget.cardData!);
+      setState(() => isLoadingDetails = false);
+    } else {
+      // Real‑time listener for webhook‑saved transaction
+      _listenForTransaction();
+      // Timeout after 10 seconds
+      Future.delayed(const Duration(seconds: 10), () {
+        if (mounted && isLoadingDetails && !_hasTimedOut) {
+          setState(() {
+            _hasTimedOut = true;
+            isLoadingDetails = false;
+          });
+        }
+      });
     }
   }
 
-  Future<void> _fetchTransactionDetails() async {
-    try {
-      final transactionDoc = await FirebaseFirestore.instance
+  void _listenForTransaction() {
+    _pollForTransaction();
+  }
+
+  Future<void> _pollForTransaction() async {
+    const maxAttempts = 20;
+    int attempts = 0;
+
+    print("🔍 ReceiptPage: Starting poll for reference: ${widget.reference}");
+
+    while (attempts < maxAttempts && mounted) {
+      print("🔄 Attempt ${attempts + 1}/$maxAttempts");
+
+      // Try 1: reference
+      QuerySnapshot refQuery = await FirebaseFirestore.instance
           .collection('transactions')
           .where('reference', isEqualTo: widget.reference)
+          .limit(1)
           .get();
-
-      if (transactionDoc.docs.isNotEmpty) {
-        final data = transactionDoc.docs.first.data();
-        final String? uid = data['actualSender'] ?? data['userId'];
-        final currentUserId = FirebaseAuth.instance.currentUser?.uid;
-        final timestamp = data['createdAtFirestore'] ?? data['timestamp'] as Timestamp?;
-        final txType = (data['type'] as String? ?? '').toLowerCase();
-        final isAnonymousTransfer =
-            txType == 'ghost_transfer' || txType == 'anonymous_transfer';
-        final isSent = uid == currentUserId || data['userId'] == currentUserId;
-        final isReceivedAnonymously = isAnonymousTransfer && !isSent;
-
-        String currentUserName = '';
-        String currentUserAccountNumber = '';
-        String currentUserBankName = '';
-        if (currentUserId != null && currentUserId.isNotEmpty) {
-          try {
-            final currentUserDoc = await FirebaseFirestore.instance
-                .collection('users')
-                .doc(currentUserId)
-                .get();
-            if (currentUserDoc.exists) {
-              final currentUserData = currentUserDoc.data() ?? <String, dynamic>{};
-              currentUserName = _firstNonEmpty([
-                '${currentUserData['firstName'] ?? ''} ${currentUserData['lastName'] ?? ''}'.trim(),
-                currentUserData['userName'],
-                currentUserData['email'],
-              ]);
-              final currentVa = getVirtualAccountData(currentUserData);
-              currentUserAccountNumber =
-                  currentVa?['attributes']?['accountNumber']?.toString() ?? '';
-              currentUserBankName =
-                  currentVa?['attributes']?['bank']?['name']?.toString() ?? '';
-            }
-          } catch (e) {
-            debugPrint('Error fetching current user for receipt details: $e');
-          }
-        }
-
-        // Fetch sender / merchant details (businesses first, then users)
-        String fetchedSenderName = _firstNonEmpty([
-          data['senderName'],
-          data['debitAccountName'],
-          data['originatorName'],
-          data['originatorAccountName'],
-          data['senderAccountName'],
-          data['counterParty']?['accountName'],
-          data['api_response']?['data']?['attributes']?['senderName'],
-          data['api_response']?['data']?['attributes']?['nameEnquiry']?['accountName'],
-        ]);
-        String fetchedSenderAccountNumber = _firstNonEmpty([
-          data['senderAccountNumber'],
-          data['debitAccountNumber'],
-          data['originatorAccountNumber'],
-          data['counterParty']?['accountNumber'],
-        ]);
-        String fetchedSenderBankName = _firstNonEmpty([
-          data['senderBankName'],
-          data['debitBankName'],
-          data['originatorBankName'],
-          data['bankName'],
-        ]);
-
-        if (!isReceivedAnonymously && uid != null && uid.isNotEmpty) {
-          // Check businesses collection first
-          final busSnap = await FirebaseFirestore.instance.collection('businesses').doc(uid).get();
-
-          if (busSnap.exists && busSnap.data() != null) {
-            final busData = busSnap.data()!;
-            final String kycStatus = busData['kycStatus'] ?? '';
-
-            if (kycStatus == 'APPROVED') {
-              fetchedSenderName = _firstNonEmpty([
-                fetchedSenderName,
-                busData['business_data']?['name'],
-                busData['businessName'],
-              ], fallback: 'Business User');
-
-              final virtualAccData = getVirtualAccountData(busData);
-              if (virtualAccData != null) {
-                fetchedSenderAccountNumber = virtualAccData['attributes']?['accountNumber']?.toString() ?? '';
-                fetchedSenderBankName = virtualAccData['attributes']?['bank']?['name']?.toString() ?? '';
-                fetchedSenderName = _firstNonEmpty([
-                  fetchedSenderName,
-                  virtualAccData['attributes']?['accountName'],
-                ], fallback: fetchedSenderName);
-              }
-            }
-          }
-
-          // Fallback to users collection if no approved business account
-          if (fetchedSenderName.isEmpty || fetchedSenderAccountNumber.isEmpty) {
-            final userSnap = await FirebaseFirestore.instance.collection('users').doc(uid).get();
-            if (userSnap.exists && userSnap.data() != null) {
-              final userData = userSnap.data()!;
-              fetchedSenderName = _firstNonEmpty([
-                fetchedSenderName,
-                "${userData['firstName'] ?? ''} ${userData['lastName'] ?? ''}".trim(),
-                userData['userName'],
-                userData['email'],
-              ], fallback: 'User');
-
-              final vaData = getVirtualAccountData(userData);
-              if (vaData != null) {
-                fetchedSenderName = _firstNonEmpty([
-                  fetchedSenderName,
-                  vaData['attributes']?['accountName'],
-                ], fallback: fetchedSenderName);
-                fetchedSenderAccountNumber =
-                    vaData['attributes']?['accountNumber']?.toString() ??
-                    fetchedSenderAccountNumber;
-                fetchedSenderBankName =
-                    vaData['attributes']?['bank']?['name']?.toString() ??
-                    fetchedSenderBankName;
-              }
-            }
-          }
-        } else if (isReceivedAnonymously) {
-          fetchedSenderName = _firstNonEmpty([
-            data['senderName'],
-            data['senderAccountName'],
-          ], fallback: 'PadiPay');
-        }
-
-        // If still empty, try to fetch by accountId from api_response
-        if (fetchedSenderAccountNumber.isEmpty || fetchedSenderName.isEmpty || fetchedSenderBankName.isEmpty) {
-          final accountId = data['api_response']?['data']?['relationships']?['account']?['data']?['id']?.toString();
-          if (accountId != null && accountId.isNotEmpty) {
-            // 1. Try users collection
-            final userQuery = await FirebaseFirestore.instance.collection('users').where('sudoData.virtualAccount.data.id', isEqualTo: accountId).get();
-            if (userQuery.docs.isNotEmpty) {
-              final userData = userQuery.docs.first.data();
-              final userVa = getVirtualAccountData(userData);
-              fetchedSenderName = _firstNonEmpty([
-                fetchedSenderName,
-                userVa?['attributes']?['accountName'],
-              ]);
-              fetchedSenderAccountNumber = userVa?['attributes']?['accountNumber']?.toString() ?? '';
-              fetchedSenderBankName = userVa?['attributes']?['bank']?['name']?.toString() ?? '';
-            } else {
-              // 2. Try businesses collection
-              final businessQuery = await FirebaseFirestore.instance.collection('businesses').where('sudoData.virtualAccount.data.id', isEqualTo: accountId).get();
-              if (businessQuery.docs.isNotEmpty) {
-                final busData = businessQuery.docs.first.data();
-                final busVa = getVirtualAccountData(busData);
-                fetchedSenderName = _firstNonEmpty([
-                  fetchedSenderName,
-                  busVa?['attributes']?['accountName'],
-                  busData['business_data']?['name'],
-                ]);
-                fetchedSenderAccountNumber = busVa?['attributes']?['accountNumber']?.toString() ?? '';
-                fetchedSenderBankName = busVa?['attributes']?['bank']?['name']?.toString() ?? '';
-              } else {
-                // 3. Try posStands array in businesses
-                final allBusinesses = await FirebaseFirestore.instance.collection('businesses').get();
-                for (var busDoc in allBusinesses.docs) {
-                  final busData = busDoc.data();
-                  final posStands = busData['posStands'] as List?;
-                  if (posStands != null) {
-                    for (var stand in posStands) {
-                      final standAccountId = stand['accountData']?['data']?['id']?.toString();
-                      if (standAccountId == accountId) {
-                        fetchedSenderName = stand['accountData']?['data']?['attributes']?['accountName']?.toString() ?? '';
-                        fetchedSenderAccountNumber = stand['accountData']?['data']?['attributes']?['accountNumber']?.toString() ?? '';
-                        fetchedSenderBankName = stand['accountData']?['data']?['attributes']?['bank']?['name']?.toString() ?? '';
-                        break;
-                      }
-                    }
-                  }
-                  if (fetchedSenderAccountNumber.isNotEmpty) break;
-                }
-              }
-            }
-          }
-        }
-
-        setState(() {
-          transactionType = data['type'] ?? '';
-          amount = (data['amount'] ?? 0).toString();
-          status = data['status'] ?? (data['api_response']?['data']?['attributes']?['status'] ?? '');
-          if (status.toLowerCase() == 'success') status = 'successful';
-
-          if (data['type'] == 'atm_payment' &&
-              ['failed', 'unsuccessful'].contains(status.toLowerCase())) {
-            final t = data['failureTitle'] as String?;
-            final d = data['failureDetail'] as String?;
-            failureReason = (t != null && d != null) ? '$t: $d' : t ?? d;
-          }
-
-          transactionDateTime = timestamp != null
-              ? DateFormat("MMMM d, yyyy 'at' h:mm:ss a 'UTC+1'").format(timestamp.toDate())
-              : '';
-
-          final isCreditLike =
-              txType == 'deposit' || txType == 'add_money' || txType == 'fund';
-          final recipientName = _firstNonEmpty([
-            data['recipientName'],
-            data['creditAccountName'],
-            data['beneficiaryAccountName'],
-            currentUserName,
-          ]);
-          final recipientAccountNumber = _firstNonEmpty([
-            data['creditAccountNumber'],
-            data['beneficiaryAccountNumber'],
-            data['account_number'],
-            data['accountNumber'],
-            currentUserAccountNumber,
-          ]);
-          final recipientBank = _firstNonEmpty([
-            data['recipientBankName'],
-            data['creditBankName'],
-            data['beneficiaryBankName'],
-            data['bankName'],
-            currentUserBankName,
-          ]);
-
-          // ------------------- RECIPIENT / PAYMENT DETAILS -------------------
-          if (transactionType == 'transfer' || transactionType == 'ghost_transfer' || isCreditLike) {
-            recipientDetails = [
-              {'label': 'Recipient Name', 'value': recipientName},
-              {'label': 'Bank Name', 'value': recipientBank},
-              {
-                'label': 'Account Number',
-                'value': recipientAccountNumber.isNotEmpty
-                    ? _maskAccountNumber(recipientAccountNumber)
-                    : '',
-              },
-            ];
-          } else if (transactionType == 'airtime') {
-            recipientDetails = [
-              {'label': 'Phone Number', 'value': data['phoneNumber'] ?? ''},
-              {'label': 'Network', 'value': data['network'] ?? ''},
-            ];
-          } else if (transactionType == 'data') {
-            recipientDetails = [
-              {'label': 'Phone Number', 'value': data['phoneNumber'] ?? ''},
-              {'label': 'Network', 'value': data['network'] ?? ''},
-              {'label': 'Bundle', 'value': data['bundle'] ?? ''},
-            ];
-          } else if (transactionType == 'cable') {
-            recipientDetails = [
-              {'label': 'Smartcard Number', 'value': data['fullData']?['customerDetail']?['smartcardNumber'] ?? ''},
-              {'label': 'Provider', 'value': data['network'] ?? ''},
-              {'label': 'Plan', 'value': data['plan'] ?? ''},
-            ];
-          } else if (transactionType == 'electricity') {
-            recipientDetails = [
-              {'label': 'Meter Number', 'value': data['meterNumber'] ?? ''},
-              {'label': 'Disco', 'value': data['disco'] ?? ''},
-              {'label': 'Token', 'value': data['token'] ?? ''},
-              {'label': 'Units', 'value': data['units'] ?? ''},
-            ];
-          } else if (transactionType == 'atm_payment') {
-            recipientDetails = [
-              {'label': 'Payment Type', 'value': 'Card Payment'},
-              {'label': 'Terminal ID', 'value': data['terminalId']?.toString() ?? ''},
-              {'label': 'RRN', 'value': data['rrn']?.toString() ?? data['reference'] ?? ''},
-            ];
-
-            // NEW: Parse card details (first 4 + last 4)
-            cardDetails = _parseCardDetails(data['cardData'] as String?);
-
-            transactionType = 'atm_payment';
-          }
-
-          senderName = fetchedSenderName.isNotEmpty
-              ? fetchedSenderName
-              : (isSent ? currentUserName : 'Unknown');
-          senderAccountNumber = fetchedSenderAccountNumber;
-          senderBankName = fetchedSenderBankName;
-
-          senderDetails = [
-            {'label': 'Sender Name', 'value': senderName},
-            if (senderBankName.isNotEmpty)
-              {'label': 'Bank Name', 'value': senderBankName},
-            if (senderAccountNumber.isNotEmpty)
-              {'label': 'Account Number', 'value': _maskAccountNumber(senderAccountNumber)},
-          ];
-
-          transactionInfo = [
-            {'label': 'Transaction No.', 'value': transactionNo},
-            {'label': 'Reference', 'value': widget.reference},
-          ];
-
-          _isLoading = false;
-        });
+      if (refQuery.docs.isNotEmpty) {
+        print("✅ Found by 'reference' field: ${refQuery.docs.first.id}");
+        await _populateFromTransactionDoc(refQuery.docs.first);
+        if (mounted) setState(() => isLoadingDetails = false);
+        return;
       } else {
-        if (mounted) setState(() => _isLoading = false);
+        print("❌ No match for 'reference' = ${widget.reference}");
       }
-    } catch (e) {
-      debugPrint('Error fetching transaction details: $e');
-      if (mounted) setState(() => _isLoading = false);
+
+      // Try 2: paymentReference
+      QuerySnapshot paymentQuery = await FirebaseFirestore.instance
+          .collection('transactions')
+          .where('paymentReference', isEqualTo: widget.reference)
+          .limit(1)
+          .get();
+      if (paymentQuery.docs.isNotEmpty) {
+        print(
+          "✅ Found by 'paymentReference' field: ${paymentQuery.docs.first.id}",
+        );
+        await _populateFromTransactionDoc(paymentQuery.docs.first);
+        if (mounted) setState(() => isLoadingDetails = false);
+        return;
+      } else {
+        print("❌ No match for 'paymentReference' = ${widget.reference}");
+      }
+
+      // Try 3: sessionId
+      QuerySnapshot sessionQuery = await FirebaseFirestore.instance
+          .collection('transactions')
+          .where('sessionId', isEqualTo: widget.reference)
+          .limit(1)
+          .get();
+      if (sessionQuery.docs.isNotEmpty) {
+        print("✅ Found by 'sessionId' field: ${sessionQuery.docs.first.id}");
+        await _populateFromTransactionDoc(sessionQuery.docs.first);
+        if (mounted) setState(() => isLoadingDetails = false);
+        return;
+      } else {
+        print("❌ No match for 'sessionId' = ${widget.reference}");
+      }
+
+      // Try 4: safehavenId
+      QuerySnapshot safehavenQuery = await FirebaseFirestore.instance
+          .collection('transactions')
+          .where('safehavenId', isEqualTo: widget.reference)
+          .limit(1)
+          .get();
+      if (safehavenQuery.docs.isNotEmpty) {
+        print(
+          "✅ Found by 'safehavenId' field: ${safehavenQuery.docs.first.id}",
+        );
+        await _populateFromTransactionDoc(safehavenQuery.docs.first);
+        if (mounted) setState(() => isLoadingDetails = false);
+        return;
+      } else {
+        print("❌ No match for 'safehavenId' = ${widget.reference}");
+      }
+
+      attempts++;
+      await Future.delayed(const Duration(milliseconds: 500));
     }
+
+    print("⏰ ReceiptPage: Polling timed out after $maxAttempts attempts");
+    if (mounted) {
+      setState(() {
+        _hasTimedOut = true;
+        isLoadingDetails = false;
+      });
+    }
+  } // ----------------------------------------------------------------------
+
+  Future<void> _populateFromTransactionDoc(DocumentSnapshot doc) async {
+    final data = doc.data() as Map<String, dynamic>;
+    final currentUserId = FirebaseAuth.instance.currentUser?.uid;
+    final userId = data['userId'] as String?;
+    final actualSender = data['actualSender'] as String?;
+    final txType = (data['type'] as String? ?? '').toLowerCase();
+
+    final principal = (data['amount'] as num?)?.toDouble() ?? 0.0;
+    principalAmount = principal.toString();
+    _fees = (data['fees'] as num?)?.toDouble() ?? 0.0;
+    _vat = (data['vat'] as num?)?.toDouble() ?? 0.0;
+    _stampDuty = (data['stampDuty'] as num?)?.toDouble() ?? 0.0;
+
+    if (data['totalAmount'] != null) {
+      _totalAmount = (data['totalAmount'] as num).toDouble();
+    } else {
+      _totalAmount = principal + _fees! + _vat! + _stampDuty!;
+    }
+
+    final isAnonymousTransfer =
+        txType == 'ghost_transfer' || txType == 'anonymous_transfer';
+    final isSent = userId == currentUserId || actualSender == currentUserId;
+    final isReceivedAnonymously = isAnonymousTransfer && !isSent;
+
+    final userIdForLookup = (actualSender != null && actualSender.isNotEmpty)
+        ? actualSender
+        : userId;
+
+    final rawTs = data['createdAtFirestore'] ?? data['timestamp'];
+    DateTime? parsedTs;
+    if (rawTs is Timestamp)
+      parsedTs = rawTs.toDate();
+    else if (rawTs is DateTime)
+      parsedTs = rawTs;
+    else if (rawTs is int)
+      parsedTs = DateTime.fromMillisecondsSinceEpoch(rawTs);
+    else if (rawTs is String)
+      try {
+        parsedTs = DateTime.parse(rawTs);
+      } catch (_) {}
+
+    // Helper to get current user details
+    String currentUserName = '';
+    String currentUserAccountNumber = '';
+    String currentUserBankName = '';
+    if (currentUserId != null && currentUserId.isNotEmpty) {
+      try {
+        final currentUserDoc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(currentUserId)
+            .get();
+        if (currentUserDoc.exists) {
+          final cuData = currentUserDoc.data()!;
+          currentUserName =
+              '${cuData['firstName'] ?? ''} ${cuData['lastName'] ?? ''}'.trim();
+          if (currentUserName.isEmpty)
+            currentUserName = cuData['userName'] ?? cuData['email'] ?? '';
+          final safehavenData =
+              cuData['safehavenData'] as Map<String, dynamic>?;
+          final virtualAccount =
+              safehavenData?['virtualAccount'] as Map<String, dynamic>?;
+          currentUserAccountNumber =
+              virtualAccount?['data']?['attributes']?['accountNumber']
+                  ?.toString() ??
+              '';
+          currentUserBankName =
+              virtualAccount?['data']?['attributes']?['bank']?['name']
+                  ?.toString() ??
+              '';
+        }
+      } catch (e) {
+        debugPrint('Error fetching current user: $e');
+      }
+    }
+
+    // ─────────────── CARD / ATM TRANSACTION – NO SENDER DETAILS ───────────────
+    final isAtmPayment =
+        (data['type'] as String? ?? '').toLowerCase() == 'atm_payment';
+    final hasCardData = data['cardData'] != null;
+
+    if (isAtmPayment || hasCardData) {
+      // No sender details at all
+      senderDetails = [];
+
+      // Clean recipient details (only show card payment info)
+      recipientDetails = [
+        {'label': 'Payment Method', 'value': 'Card Payment'},
+      ];
+
+      // Also override any sender variables that might be used later
+      senderName = '';
+      senderAccountNumber = '';
+      senderBankName = '';
+    } else {
+      // ─────────────── NORMAL TRANSACTIONS – FETCH SENDER ────────────────────
+      String fetchedSenderName = _firstNonEmpty([
+        data['senderName'],
+        data['debitAccountName'],
+        data['originatorAccountName'],
+        data['counterParty']?['accountName'],
+        data['api_response']?['data']?['attributes']?['senderName'],
+      ]);
+      String fetchedSenderAccountNumber = _firstNonEmpty([
+        data['senderAccountNumber'],
+        data['debitAccountNumber'],
+        data['originatorAccountNumber'],
+        data['counterParty']?['accountNumber'],
+      ]);
+      String fetchedSenderBankName = _firstNonEmpty([
+        data['senderBankName'],
+        data['debitBankName'],
+        data['originatorBankName'],
+        data['bankName'],
+      ]);
+
+      final shouldLookupSenderByUid =
+          !isReceivedAnonymously &&
+          fetchedSenderName.isEmpty &&
+          userIdForLookup != null &&
+          userIdForLookup.isNotEmpty &&
+          (txType == 'transfer' || txType == 'ghost_transfer');
+
+      if (shouldLookupSenderByUid) {
+        try {
+          final userDoc = await FirebaseFirestore.instance
+              .collection('users')
+              .doc(userIdForLookup)
+              .get();
+          if (userDoc.exists) {
+            final userData = userDoc.data()!;
+            fetchedSenderName =
+                '${userData['firstName'] ?? ''} ${userData['lastName'] ?? ''}'
+                    .trim();
+            if (fetchedSenderName.isEmpty)
+              fetchedSenderName = userData['userName'] ?? '';
+            final safehavenData =
+                userData['safehavenData'] as Map<String, dynamic>?;
+            if (safehavenData != null) {
+              final virtualAccount =
+                  safehavenData['virtualAccount'] as Map<String, dynamic>?;
+              if (virtualAccount != null) {
+                fetchedSenderAccountNumber =
+                    virtualAccount['data']['attributes']['accountNumber']
+                        ?.toString() ??
+                    '';
+                fetchedSenderBankName =
+                    virtualAccount['data']['attributes']['bank']?['name']
+                        ?.toString() ??
+                    '';
+              }
+            }
+          }
+        } catch (e) {
+          debugPrint('Error fetching sender user doc: $e');
+        }
+      } else if (isReceivedAnonymously) {
+        try {
+          final companyDoc = await FirebaseFirestore.instance
+              .collection('company')
+              .doc('account_details')
+              .get();
+          if (companyDoc.exists) {
+            final companyData = companyDoc.data()!;
+            fetchedSenderName =
+                companyData['accountName']?.toString() ?? 'PadiPay';
+            fetchedSenderAccountNumber =
+                companyData['accountNumber']?.toString() ?? '';
+            fetchedSenderBankName = companyData['bankName']?.toString() ?? '';
+          }
+        } catch (e) {
+          debugPrint('Error fetching company details: $e');
+        }
+      }
+
+      final isCreditLike =
+          txType == 'deposit' || txType == 'add_money' || txType == 'fund';
+
+      final recipientName = _firstNonEmpty([
+        data['recipientName'],
+        data['creditAccountName'],
+        data['beneficiaryAccountName'],
+        currentUserName,
+      ]);
+
+      final recipientAccountNumber = _firstNonEmpty([
+        data['recipientAccount'],
+        data['creditAccountNumber'],
+        data['beneficiaryAccountNumber'],
+        data['account_number'],
+        data['accountNumber'],
+        currentUserAccountNumber,
+      ]);
+
+      final recipientBank = _firstNonEmpty([
+        data['recipientBankName'],
+        data['creditBankName'],
+        data['beneficiaryBankName'],
+        data['bankName'],
+        currentUserBankName,
+      ]);
+
+      // Build recipient details based on transaction type
+      if (txType == 'transfer' || txType == 'ghost_transfer' || isCreditLike) {
+        recipientDetails = [
+          {'label': 'Recipient Name', 'value': recipientName},
+          {'label': 'Bank Name', 'value': recipientBank},
+          {
+            'label': 'Account Number',
+            'value': recipientAccountNumber.isNotEmpty
+                ? recipientAccountNumber
+                : '',
+          },
+        ];
+      } else if (txType == 'airtime') {
+        recipientDetails = [
+          {'label': 'Phone Number', 'value': data['phoneNumber'] ?? ''},
+          {'label': 'Network', 'value': data['network'] ?? ''},
+        ];
+      } else if (txType == 'data') {
+        recipientDetails = [
+          {'label': 'Phone Number', 'value': data['phoneNumber'] ?? ''},
+          {'label': 'Network', 'value': data['network'] ?? ''},
+          {'label': 'Bundle', 'value': data['bundle'] ?? ''},
+        ];
+      } else if (txType == 'cable') {
+        recipientDetails = [
+          {
+            'label': 'Smartcard Number',
+            'value':
+                data['fullData']?['customerDetail']?['smartcardNumber'] ?? '',
+          },
+          {'label': 'Provider', 'value': data['network'] ?? ''},
+          {'label': 'Plan', 'value': data['plan'] ?? ''},
+        ];
+      } else if (txType == 'electricity') {
+        recipientDetails = [
+          {'label': 'Meter Number', 'value': data['meterNumber'] ?? ''},
+          {'label': 'Disco', 'value': data['disco'] ?? ''},
+          {'label': 'Token', 'value': data['token'] ?? ''},
+          {'label': 'Units', 'value': data['units'] ?? ''},
+        ];
+      } else {
+        recipientDetails = [
+          {'label': 'Recipient Name', 'value': recipientName},
+          {'label': 'Bank Name', 'value': recipientBank},
+        ];
+        if (recipientAccountNumber.isNotEmpty) {
+          recipientDetails.add({
+            'label': 'Account Number',
+            'value': _maskAccountNumber(recipientAccountNumber),
+          });
+        }
+      }
+
+      senderName = fetchedSenderName.isNotEmpty
+          ? fetchedSenderName
+          : (isSent ? currentUserName : 'Unknown');
+      senderAccountNumber = fetchedSenderAccountNumber;
+      senderBankName = fetchedSenderBankName;
+
+      senderDetails = [
+        {'label': 'Sender Name', 'value': senderName},
+        if (senderBankName.isNotEmpty)
+          {'label': 'Bank Name', 'value': senderBankName},
+        if (senderAccountNumber.isNotEmpty)
+          {
+            'label': 'Account Number',
+            'value': _maskAccountNumber(senderAccountNumber),
+          },
+      ];
+    } // end else (normal transactions)
+
+    // ─────────────── COMMON DATA (type, status, date, transaction info) ────────
+    setState(() {
+      transactionType = data['type'] ?? '';
+      amount = principalAmount;
+      status =
+          data['status'] ??
+          data['api_response']?['data']?['attributes']?['status'] ??
+          '';
+      transactionDateTime = parsedTs != null
+          ? DateFormat("MMMM d, yyyy 'at' h:mm:ss a 'UTC+1'").format(parsedTs)
+          : '';
+
+      transactionInfo = [
+        {'label': 'Transaction No.', 'value': transactionNo},
+        {'label': 'Reference', 'value': widget.reference},
+      ];
+    });
+  } // ----------------------------------------------------------------------
+
+  //  Card data (synchronous, no webhook)
+  // ----------------------------------------------------------------------
+  void _populateFromCardData(Map<String, dynamic> data) {
+    final type = data['type']?.toString() ?? '';
+    final ts = data['timestamp'] as Timestamp?;
+    final parsedTs = ts?.toDate();
+    setState(() {
+      transactionType = type;
+      amount = (data['amount'] ?? 0).toString();
+      if (type == 'card_declined')
+        status = 'Declined';
+      else if (type == 'card_refund')
+        status = 'Refunded';
+      else
+        status = 'Successful';
+
+      transactionDateTime = parsedTs != null
+          ? DateFormat("MMMM d, yyyy 'at' h:mm:ss a 'UTC+1'").format(parsedTs)
+          : '';
+
+      String? declineReasonText;
+      if (type == 'card_declined') {
+        if (data['reason'] != null && data['reason'].toString().isNotEmpty) {
+          declineReasonText = data['reason'].toString();
+        }
+        if (data['declineReason'] != null) {
+          final code = data['declineReason'].toString();
+          if (code == 'insufficient_funds')
+            declineReasonText = 'Insufficient wallet balance';
+          else if (code == 'card_frozen')
+            declineReasonText = 'Card is frozen';
+          else if (code == 'channel_blocked') {
+            final ch = (data['declineChannelLabel']?.toString() ?? '')
+                .toLowerCase();
+            final label = ch == 'pos'
+                ? 'POS (in-store)'
+                : ch == 'atm'
+                ? 'ATM'
+                : 'Online (Web)';
+            declineReasonText =
+                '$label transactions are disabled on this card.\nTo enable: Cards → tap card → ••• menu → Card Channels → turn on $label.';
+          } else
+            declineReasonText = code;
+        }
+      }
+
+      recipientDetails = [
+        {'label': 'Merchant', 'value': data['merchant']?.toString() ?? ''},
+        if ((data['channel'] ?? '').toString().isNotEmpty)
+          {
+            'label': 'Channel',
+            'value': (data['channel']?.toString() ?? '').toUpperCase(),
+          },
+        {'label': 'Currency', 'value': data['currency']?.toString() ?? 'NGN'},
+        if (type == 'card_declined' && declineReasonText != null)
+          {'label': 'Decline Reason', 'value': declineReasonText},
+      ];
+      senderDetails = [];
+      transactionInfo = [
+        {'label': 'Transaction No.', 'value': transactionNo},
+        if (widget.reference.isNotEmpty)
+          {'label': 'Reference', 'value': widget.reference},
+      ];
+    });
   }
 
   void _generateTransactionIds() {
-    setState(() {
-      transactionNo = widget.reference;
-    });
+    setState(() => transactionNo = widget.reference);
+  }
+
+  String _firstNonEmpty(List<dynamic> values, {String fallback = ''}) {
+    for (final value in values) {
+      final text = (value ?? '').toString().trim();
+      if (text.isNotEmpty && text.toLowerCase() != 'null') return text;
+    }
+    return fallback;
   }
 
   String getFormattedAmount() {
     final number = double.parse(amount.isEmpty ? '0' : amount);
-    final formatter = NumberFormat('#,###');
-    return formatter.format(number);
+    return NumberFormat('#,###').format(number);
   }
 
   String _maskAccountNumber(String accountNumber) {
@@ -418,38 +552,115 @@ class _ReceiptPageState extends State<ReceiptPage> {
     return '${accountNumber.substring(0, 3)}****${accountNumber.substring(accountNumber.length - 3)}';
   }
 
-  Color _getStatusColor() {
-    switch (status.toUpperCase()) {
+  String _normalizedStatus() {
+    final raw = status.trim().toUpperCase();
+    if (raw == 'SUCCESSFUL' ||
+        raw == 'SUCCESS' ||
+        raw == 'COMPLETED' ||
+        raw == 'APPROVED')
+      return 'SUCCESSFUL';
+    if (raw == 'FAILED' ||
+        raw == 'FAIL' ||
+        raw == 'DECLINED' ||
+        raw == 'UNSUCCESSFUL')
+      return 'FAILED';
+    if (raw == 'PENDING' || raw == 'PROCESSING' || raw == 'IN_PROGRESS')
+      return 'PENDING';
+    if (raw == 'REFUNDED') return 'REFUNDED';
+    return raw.isEmpty ? 'PENDING' : raw;
+  }
+
+  String _statusDisplayLabel() {
+    switch (_normalizedStatus()) {
       case 'SUCCESSFUL':
-      case 'SUCCESS':
-      case 'COMPLETED':
+        return 'Successful';
+      case 'FAILED':
+        return 'Failed';
+      case 'PENDING':
+        return 'Pending';
+      case 'REFUNDED':
+        return 'Refunded';
+      default:
+        final s = status.trim();
+        return s.isEmpty
+            ? 'Pending'
+            : s[0].toUpperCase() + s.substring(1).toLowerCase();
+    }
+  }
+
+  Color _getStatusColor() {
+    switch (_normalizedStatus()) {
+      case 'SUCCESSFUL':
         return const Color(0xFF00A86B);
       case 'FAILED':
-      case 'UNSUCCESSFUL':
         return Colors.red;
       case 'PENDING':
         return Colors.orange;
+      case 'REFUNDED':
+        return Colors.blue;
       default:
         return Colors.grey;
     }
   }
 
   PdfColor _getPdfStatusColor() {
-    switch (status.toUpperCase()) {
+    switch (_normalizedStatus()) {
       case 'SUCCESSFUL':
         return PdfColor.fromHex('00A86B');
       case 'FAILED':
         return PdfColors.red;
       case 'PENDING':
         return PdfColors.orange;
+      case 'REFUNDED':
+        return PdfColors.blue;
       default:
         return PdfColors.grey;
     }
   }
 
+  List<Map<String, String>> _getFeeBreakdown() {
+    final breakdown = <Map<String, String>>[];
+    final principalVal = double.tryParse(principalAmount) ?? 0.0;
+    final totalVal = _totalAmount ?? principalVal;
+
+    if ((_fees ?? 0) > 0 || (_vat ?? 0) > 0 || (_stampDuty ?? 0) > 0) {
+      if (principalVal > 0)
+        breakdown.add({
+          'label': 'Transfer Amount',
+          'value': '₦${NumberFormat('#,##0.00').format(principalVal)}',
+        });
+      if ((_fees ?? 0) > 0)
+        breakdown.add({
+          'label': 'Transaction Fee',
+          'value': '₦${NumberFormat('#,##0.00').format(_fees!)}',
+        });
+      if ((_vat ?? 0) > 0)
+        breakdown.add({
+          'label': 'VAT',
+          'value': '₦${NumberFormat('#,##0.00').format(_vat!)}',
+        });
+      if ((_stampDuty ?? 0) > 0)
+        breakdown.add({
+          'label': 'Stamp Duty',
+          'value': '₦${NumberFormat('#,##0.00').format(_stampDuty!)}',
+        });
+      if (totalVal != principalVal)
+        breakdown.add({
+          'label': 'Total Charged',
+          'value': '₦${NumberFormat('#,##0.00').format(totalVal)}',
+        });
+    }
+    return breakdown;
+  }
+
+  // ----------------------------------------------------------------------
+  //  Share / PDF helpers (unchanged)
+  // ----------------------------------------------------------------------
   Future<void> _shareImage() async {
     try {
-      final boundary = _boundaryKey.currentContext!.findRenderObject() as RenderRepaintBoundary;
+      final boundary =
+          _boundaryKey.currentContext!.findRenderObject()
+              as RenderRepaintBoundary;
       final image = await boundary.toImage(pixelRatio: 3.0);
       final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
       final pngBytes = byteData!.buffer.asUint8List();
@@ -469,12 +680,12 @@ class _ReceiptPageState extends State<ReceiptPage> {
         canvas.setLineWidth(2);
         canvas.drawEllipse(0, 0, size.x, size.y);
         canvas.strokePath();
-        if (status.toUpperCase() == 'SUCCESSFUL') {
+        if (_normalizedStatus() == 'SUCCESSFUL') {
           canvas.moveTo(size.x * 0.2, size.y * 0.55);
           canvas.lineTo(size.x * 0.45, size.y * 0.75);
           canvas.lineTo(size.x * 0.8, size.y * 0.35);
           canvas.strokePath();
-        } else if (status.toUpperCase() == 'FAILED') {
+        } else if (_normalizedStatus() == 'FAILED') {
           canvas.moveTo(size.x * 0.3, size.y * 0.3);
           canvas.lineTo(size.x * 0.7, size.y * 0.7);
           canvas.moveTo(size.x * 0.7, size.y * 0.3);
@@ -489,33 +700,46 @@ class _ReceiptPageState extends State<ReceiptPage> {
     );
   }
 
-  pw.Widget _buildDetailsSection(String title, List<Map<String, String>> details) {
+  pw.Widget _buildDetailsSection(
+    String title,
+    List<Map<String, String>> details,
+  ) {
     return pw.Column(
       crossAxisAlignment: pw.CrossAxisAlignment.start,
       children: [
         pw.Text(title, style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
         pw.SizedBox(height: 10),
-        ...details.map((item) => pw.Column(
-          children: [
-            pw.Row(
-              mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
-              children: [
-                pw.Text(
-                  item['label'] ?? '',
-                  style: pw.TextStyle(color: PdfColors.grey, fontWeight: pw.FontWeight.bold),
-                ),
-                pw.Text(item['value'] ?? '', style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
-              ],
-            ),
-            pw.SizedBox(height: 10),
-          ],
-        )),
+        ...details.map(
+          (item) => pw.Column(
+            children: [
+              pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+                  pw.Text(
+                    item['label'] ?? '',
+                    style: pw.TextStyle(
+                      color: PdfColors.grey,
+                      fontWeight: pw.FontWeight.bold,
+                    ),
+                  ),
+                  pw.Text(
+                    item['value'] ?? '',
+                    style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+                  ),
+                ],
+              ),
+              pw.SizedBox(height: 10),
+            ],
+          ),
+        ),
       ],
     );
   }
 
   Future<Uint8List> _generatePdf() async {
     final pdf = pw.Document();
+    final font = PdfFont.helvetica(pdf.document);
+    final feeBreakdown = _getFeeBreakdown();
 
     pdf.addPage(
       pw.Page(
@@ -523,7 +747,10 @@ class _ReceiptPageState extends State<ReceiptPage> {
         build: (pw.Context context) => pw.Stack(
           children: [
             pw.CustomPaint(
-              size: PdfPoint(context.page.pageFormat.width - 64, context.page.pageFormat.height - 64),
+              size: PdfPoint(
+                context.page.pageFormat.width - 64,
+                context.page.pageFormat.height - 64,
+              ),
               painter: (PdfGraphics canvas, PdfPoint size) {
                 canvas.saveContext();
                 final currentTransform = canvas.getTransform();
@@ -533,7 +760,7 @@ class _ReceiptPageState extends State<ReceiptPage> {
                 const spacing = 100.0;
                 for (double x = -size.x * 2; x < size.x * 2; x += spacing) {
                   for (double y = -size.y * 2; y < size.y * 2; y += spacing) {
-                    canvas.drawString(PdfFont.helvetica(pdf.document), 25, 'PadiPay', x, y / 4);
+                    canvas.drawString(font, 25, 'PadiPay', x, y / 4);
                   }
                 }
                 canvas.restoreContext();
@@ -549,7 +776,10 @@ class _ReceiptPageState extends State<ReceiptPage> {
                     alignment: pw.Alignment.center,
                     child: pw.Container(
                       padding: const pw.EdgeInsets.all(14),
-                      decoration: pw.BoxDecoration(color: _getPdfStatusColor(), shape: pw.BoxShape.circle),
+                      decoration: pw.BoxDecoration(
+                        color: _getPdfStatusColor(),
+                        shape: pw.BoxShape.circle,
+                      ),
                       child: _buildStatusIcon(30),
                     ),
                   ),
@@ -557,7 +787,10 @@ class _ReceiptPageState extends State<ReceiptPage> {
                     alignment: pw.Alignment.center,
                     child: pw.Text(
                       "NGN ${getFormattedAmount()}",
-                      style: pw.TextStyle(fontSize: 30, fontWeight: pw.FontWeight.bold),
+                      style: pw.TextStyle(
+                        fontSize: 30,
+                        fontWeight: pw.FontWeight.bold,
+                      ),
                     ),
                   ),
                   pw.SizedBox(height: 5),
@@ -568,7 +801,10 @@ class _ReceiptPageState extends State<ReceiptPage> {
                       children: [
                         _buildStatusIcon(16),
                         pw.SizedBox(width: 5),
-                        pw.Text(status, style: pw.TextStyle(color: _getPdfStatusColor())),
+                        pw.Text(
+                          _statusDisplayLabel(),
+                          style: pw.TextStyle(color: _getPdfStatusColor()),
+                        ),
                       ],
                     ),
                   ),
@@ -577,31 +813,45 @@ class _ReceiptPageState extends State<ReceiptPage> {
                     alignment: pw.Alignment.center,
                     child: pw.Text(
                       transactionDateTime,
-                      style: pw.TextStyle(fontSize: 14, color: PdfColors.grey500, fontWeight: pw.FontWeight.bold),
+                      style: pw.TextStyle(
+                        fontSize: 14,
+                        color: PdfColors.grey500,
+                        fontWeight: pw.FontWeight.bold,
+                      ),
                     ),
                   ),
                   pw.SizedBox(height: 10),
                   pw.Divider(color: PdfColors.grey300),
                   pw.SizedBox(height: 5),
-
-                  // ────────────────────── CONDITIONAL SECTIONS FOR PDF ──────────────────────
-                  if (transactionType == 'atm_payment') ...[
-                    _buildDetailsSection("Payment Details", recipientDetails),
-                    _buildDetailsSection("Card Details", cardDetails),
-                    _buildDetailsSection("Receiver Details", senderDetails),
-                  ] else ...[
-                    _buildDetailsSection("Recipient Details", recipientDetails),
-                    _buildDetailsSection("Sender Details", senderDetails),
-                  ],
-
-                  pw.SizedBox(height: 10),
+                  _buildDetailsSection("Recipient Details", recipientDetails),
                   pw.Divider(color: PdfColors.grey300),
                   pw.SizedBox(height: 10),
-                  _buildDetailsSection("Transaction Information", transactionInfo),
+                  if (senderDetails.isNotEmpty) ...[
+                    pw.Divider(color: PdfColors.grey300),
+                    pw.SizedBox(height: 10),
+                    _buildDetailsSection("Sender Details", senderDetails),
+                    pw.SizedBox(height: 10),
+                  ],
+                  pw.SizedBox(height: 10),
+                  pw.Divider(color: PdfColors.grey300),
+                  if (feeBreakdown.isNotEmpty) ...[
+                    pw.SizedBox(height: 10),
+                    _buildDetailsSection("Fees & Charges", feeBreakdown),
+                    pw.SizedBox(height: 10),
+                    pw.Divider(color: PdfColors.grey300),
+                  ],
+                  pw.SizedBox(height: 10),
+                  _buildDetailsSection(
+                    "Transaction Information",
+                    transactionInfo,
+                  ),
                   pw.SizedBox(height: 20),
                   pw.Container(
                     padding: const pw.EdgeInsets.all(10),
-                    decoration: pw.BoxDecoration(color: PdfColors.grey50, borderRadius: pw.BorderRadius.circular(20)),
+                    decoration: pw.BoxDecoration(
+                      color: PdfColors.grey50,
+                      borderRadius: pw.BorderRadius.circular(20),
+                    ),
                     child: pw.Text(
                       "Enjoy a better life with PadiPay. Get free transfers, instant loans, and cashback rewards.",
                       textAlign: pw.TextAlign.center,
@@ -615,7 +865,6 @@ class _ReceiptPageState extends State<ReceiptPage> {
         ),
       ),
     );
-
     return pdf.save();
   }
 
@@ -631,107 +880,67 @@ class _ReceiptPageState extends State<ReceiptPage> {
   }
 
   Future<void> refresh() async {
-    navigateTo(context, ReceiptPage(reference: widget.reference), type: NavigationType.replace);
+    navigateTo(
+      context,
+      ReceiptPage(reference: widget.reference, cardData: widget.cardData),
+      type: NavigationType.replace,
+    );
   }
 
-  Widget _buildDetailsSectionUI(String title, List<Map<String, String>> details) {
+  Widget _buildDetailsSectionUI(
+    String title,
+    List<Map<String, String>> details,
+  ) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           title,
-          style: const TextStyle(color: Colors.black, fontSize: 14, fontWeight: FontWeight.w600),
+          style: GoogleFonts.inter(
+            color: Colors.black,
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+          ),
         ),
         const SizedBox(height: 10),
-        ...details.map((item) => Column(
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  item['label'] ?? '',
-                  style: const TextStyle(fontWeight: FontWeight.w700, color: Colors.grey, fontSize: 12),
-                ),
-                Text(
-                  item['value'] ?? '',
-                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-          ],
-        )),
-      ],
-    );
-  }
-
-  Widget _buildShimmerSection() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(width: 120, height: 14, color: Colors.white),
-        const SizedBox(height: 10),
-        ...List.generate(3, (index) => Column(
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Container(width: 100, height: 12, color: Colors.white),
-                Container(width: 120, height: 12, color: Colors.white),
-              ],
-            ),
-            const SizedBox(height: 10),
-          ],
-        )),
-      ],
-    );
-  }
-
-  Widget _buildShimmer() {
-    return Shimmer.fromColors(
-      baseColor: Colors.grey[300]!,
-      highlightColor: Colors.grey[100]!,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const SizedBox(height: 10),
-            Container(width: 58, height: 58, decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle)),
-            const SizedBox(height: 16),
-            Container(width: 200, height: 30, color: Colors.white),
-            const SizedBox(height: 5),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Container(width: 16, height: 16, decoration: const BoxDecoration(color: Colors.white, shape: BoxShape.circle)),
-                const SizedBox(width: 5),
-                Container(width: 80, height: 16, color: Colors.white),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Container(width: 150, height: 16, color: Colors.white),
-            const SizedBox(height: 10),
-            Divider(color: Colors.grey.shade300),
-            const SizedBox(height: 5),
-            _buildShimmerSection(),
-            Divider(color: Colors.grey.shade300),
-            const SizedBox(height: 10),
-            _buildShimmerSection(),
-            const SizedBox(height: 10),
-            Divider(color: Colors.grey.shade300),
-            const SizedBox(height: 10),
-            _buildShimmerSection(),
-            const SizedBox(height: 20),
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(color: Colors.grey.shade50, borderRadius: BorderRadius.circular(20)),
-              child: Container(height: 20, color: Colors.white),
-            ),
-          ],
+        ...details.map(
+          (item) => Column(
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    flex: 3,
+                    child: Text(
+                      item['label'] ?? '',
+                      style: GoogleFonts.inter(
+                        fontWeight: FontWeight.w700,
+                        color: Colors.grey,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    flex: 5,
+                    child: Text(
+                      item['value'] ?? '',
+                      textAlign: TextAlign.right,
+                      softWrap: true,
+                      overflow: TextOverflow.visible,
+                      style: GoogleFonts.inter(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+            ],
+          ),
         ),
-      ),
+      ],
     );
   }
 
@@ -757,7 +966,13 @@ class _ReceiptPageState extends State<ReceiptPage> {
                   children: [
                     Icon(Icons.share, size: 20, color: Colors.grey.shade700),
                     const SizedBox(width: 10),
-                    Text("Share Image", style: TextStyle(color: Colors.grey.shade700, fontWeight: FontWeight.w600)),
+                    Text(
+                      "Share Image",
+                      style: GoogleFonts.inter(
+                        color: Colors.grey.shade700,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -776,7 +991,13 @@ class _ReceiptPageState extends State<ReceiptPage> {
                   children: [
                     Icon(Icons.article, size: 20, color: Colors.grey.shade700),
                     const SizedBox(width: 10),
-                    Text("Share PDF", style: TextStyle(color: Colors.grey.shade700, fontWeight: FontWeight.w600)),
+                    Text(
+                      "Share PDF",
+                      style: GoogleFonts.inter(
+                        color: Colors.grey.shade700,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -790,137 +1011,358 @@ class _ReceiptPageState extends State<ReceiptPage> {
         centerTitle: true,
         leading: GestureDetector(
           onTap: () => Navigator.of(context).pop(),
-          child: const Icon(Icons.arrow_back_ios, color: Colors.black87, size: 20),
+          child: const Icon(
+            Icons.arrow_back_ios,
+            color: Colors.black87,
+            size: 20,
+          ),
         ),
-        title: const Text("Share Receipt", style: TextStyle(color: Colors.black87, fontWeight: FontWeight.bold, fontSize: 18)),
+        title: Text(
+          "Share Receipt",
+          style: GoogleFonts.inter(
+            color: Colors.black87,
+            fontWeight: FontWeight.bold,
+            fontSize: 18,
+          ),
+        ),
       ),
       backgroundColor: Colors.white,
-      body: RefreshIndicator(
-        color: primaryColor,
-        backgroundColor: Colors.white,
-        onRefresh: () => refresh(),
-        child: Container(
-          width: double.infinity,
-          margin: const EdgeInsets.symmetric(horizontal: 16),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            boxShadow: [BoxShadow(color: Colors.grey.shade100, offset: const Offset(1, 1.5))],
-            border: Border.all(color: Colors.grey.withOpacity(0.1)),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: SingleChildScrollView(
-            child: _isLoading
-                ? _buildShimmer()
-                : Theme(
-                    data: Theme.of(context).copyWith(brightness: Brightness.light),
-                    child: MediaQuery(
-                      data: MediaQuery.of(context).copyWith(platformBrightness: Brightness.light),
-                      child: RepaintBoundary(
-                        key: _boundaryKey,
-                        child: Container(
-                          color: Colors.white,
-                          child: CustomPaint(
-                            painter: WatermarkPainter(),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.start,
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const SizedBox(height: 10),
-                                Container(
-                                  padding: const EdgeInsets.all(14),
-                                  decoration: BoxDecoration(
-                                    color: _getStatusColor().withOpacity(0.1),
-                                    shape: BoxShape.circle,
-                                  ),
-                                  child: Icon(
-                                    status.toUpperCase() == 'SUCCESSFUL'
-                                        ? Icons.check_circle_outline_rounded
-                                        : status.toUpperCase() == 'FAILED'
-                                            ? Icons.close_rounded
-                                            : Icons.hourglass_empty_rounded,
-                                    size: 30,
-                                    color: _getStatusColor(),
-                                  ),
-                                ),
-                                Text(
-                                  "₦${getFormattedAmount()}",
-                                  style: const TextStyle(color: Colors.black, fontSize: 30, fontWeight: FontWeight.bold),
-                                ),
-                                const SizedBox(height: 5),
-                                Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    Icon(
-                                      status.toUpperCase() == 'SUCCESSFUL'
-                                          ? Icons.check_circle_outline_rounded
-                                          : status.toUpperCase() == 'FAILED'
-                                              ? Icons.close_rounded
-                                              : Icons.hourglass_empty_rounded,
-                                      size: 16,
-                                      color: _getStatusColor(),
-                                    ),
-                                    const SizedBox(width: 5),
-                                    Text(status, style: TextStyle(color: _getStatusColor())),
-                                  ],
-                                ),
-                                if (failureReason != null)
-                                  Padding(
-                                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                                    child: Text(
-                                      failureReason!,
-                                      textAlign: TextAlign.center,
-                                      style: TextStyle(color: Colors.red.shade700, fontSize: 12, fontWeight: FontWeight.w500),
-                                    ),
-                                  ),
-                                const SizedBox(height: 10),
-                                Text(
-                                  transactionDateTime,
-                                  style:  TextStyle(color: Colors.grey.shade500, fontSize: 14, fontWeight: FontWeight.w600),
-                                ),
-                                const SizedBox(height: 10),
-                                Divider(color: Colors.grey.shade300),
-                                const SizedBox(height: 5),
-                                Padding(
-                                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                                  child: Column(
-                                    children: [
-                                      // ────────────────────── CONDITIONAL UI SECTIONS ──────────────────────
-                                      if (transactionType == 'atm_payment') ...[
-                                        _buildDetailsSectionUI("Payment Details", recipientDetails),
-                                        _buildDetailsSectionUI("Card Details", cardDetails),
-                                        _buildDetailsSectionUI("Receiver Details", senderDetails),
-                                      ] else ...[
-                                        _buildDetailsSectionUI("Recipient Details", recipientDetails),
-                                        _buildDetailsSectionUI("Sender Details", senderDetails),
-                                      ],
-
-                                      const SizedBox(height: 10),
-                                      Divider(color: Colors.grey.shade300),
-                                      const SizedBox(height: 10),
-                                      _buildDetailsSectionUI("Transaction Information", transactionInfo),
-                                      const SizedBox(height: 20),
-                                      Container(
-                                        padding: const EdgeInsets.all(10),
-                                        decoration: BoxDecoration(
-                                          color: Colors.grey.shade50,
-                                          borderRadius: BorderRadius.circular(20),
-                                        ),
-                                        child:  Text(
-                                          "Enjoy a better life with PadiPay. Get free transfers, instant loans, and cashback rewards.",
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(color: Colors.grey.shade500),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
+      body: Stack(
+        children: [
+          RefreshIndicator(
+            color: primaryColor,
+            backgroundColor: Colors.white,
+            onRefresh: refresh,
+            child: Container(
+              width: double.infinity,
+              margin: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.grey.shade100,
+                    offset: const Offset(1, 1.5),
+                  ),
+                ],
+                border: Border.all(color: Colors.grey.withOpacity(0.1)),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: SingleChildScrollView(
+                child: Theme(
+                  data: Theme.of(
+                    context,
+                  ).copyWith(brightness: Brightness.light),
+                  child: MediaQuery(
+                    data: MediaQuery.of(
+                      context,
+                    ).copyWith(platformBrightness: Brightness.light),
+                    child: RepaintBoundary(
+                      key: _boundaryKey,
+                      child: Container(
+                        color: Colors.white,
+                        child: CustomPaint(
+                          painter: WatermarkPainter(),
+                          child: _buildBody(),
                         ),
                       ),
                     ),
                   ),
+                ),
+              ),
+            ),
+          ),
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: ConfettiWidget(
+                  confettiController: _confettiController,
+                  blastDirectionality: BlastDirectionality.explosive,
+                  shouldLoop: false,
+                  colors: const [
+                    Colors.green,
+                    Colors.blue,
+                    Colors.pink,
+                    Colors.orange,
+                    Colors.purple,
+                  ],
+                  numberOfParticles: 30,
+                  gravity: 0.2,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBody() {
+    if (widget.cardData != null) {
+      // cardData flow is synchronous, already populated
+      return _buildReceiptContent();
+    }
+
+    if (_hasTimedOut) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Icon(Icons.timer_off_outlined, size: 48, color: Colors.grey),
+            const SizedBox(height: 16),
+            Text(
+              "Receipt not ready yet",
+              style: GoogleFonts.inter(
+                fontSize: 16,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              "The transaction record is still being processed.\nPlease try again in a few seconds.",
+              textAlign: TextAlign.center,
+              style: GoogleFonts.inter(color: Colors.grey.shade600),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: () {
+                setState(() {
+                  _hasTimedOut = false;
+                  isLoadingDetails = true;
+                  _listenForTransaction();
+                  Future.delayed(const Duration(seconds: 10), () {
+                    if (mounted && isLoadingDetails && !_hasTimedOut)
+                      setState(() => _hasTimedOut = true);
+                  });
+                });
+              },
+              style: ElevatedButton.styleFrom(backgroundColor: primaryColor),
+              child: Text(
+                "Retry",
+                style: GoogleFonts.inter(color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (isLoadingDetails) {
+      return _buildShimmerSkeleton();
+    }
+
+    return _buildReceiptContent();
+  }
+
+  Widget _buildReceiptContent() {
+    final feeBreakdown = _getFeeBreakdown();
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: _getStatusColor().withOpacity(0.1),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(
+            _normalizedStatus() == 'SUCCESSFUL'
+                ? Icons.check_circle_rounded
+                : (_normalizedStatus() == 'FAILED'
+                      ? Icons.cancel_outlined
+                      : Icons.hourglass_empty_rounded),
+            size: 30,
+            color: _getStatusColor(),
+          ),
+        ),
+        Text(
+          "₦${getFormattedAmount()}",
+          style: GoogleFonts.inter(
+            color: Colors.black,
+            fontSize: 30,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(height: 5),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              _normalizedStatus() == 'SUCCESSFUL'
+                  ? Icons.check_circle_rounded
+                  : (_normalizedStatus() == 'FAILED'
+                        ? Icons.cancel_outlined
+                        : Icons.hourglass_empty_rounded),
+              size: 16,
+              color: _getStatusColor(),
+            ),
+            const SizedBox(width: 5),
+            Text(
+              _statusDisplayLabel(),
+              style: GoogleFonts.inter(color: _getStatusColor()),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Text(
+          transactionDateTime,
+          style: GoogleFonts.inter(
+            color: Colors.grey.shade500,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 10),
+        Divider(color: Colors.grey.shade300),
+        const SizedBox(height: 5),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          child: Column(
+            children: [
+              _buildDetailsSectionUI("Recipient Details", recipientDetails),
+              Divider(color: Colors.grey.shade300),
+              const SizedBox(height: 10),
+              if (senderDetails.isNotEmpty) ...[
+                Divider(color: Colors.grey.shade300),
+                const SizedBox(height: 10),
+                _buildDetailsSectionUI("Sender Details", senderDetails),
+                const SizedBox(height: 10),
+              ],
+              const SizedBox(height: 10),
+              Divider(color: Colors.grey.shade300),
+              if (feeBreakdown.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                _buildDetailsSectionUI("Fees & Charges", feeBreakdown),
+                const SizedBox(height: 10),
+                Divider(color: Colors.grey.shade300),
+              ],
+              const SizedBox(height: 10),
+              _buildDetailsSectionUI(
+                "Transaction Information",
+                transactionInfo,
+              ),
+              const SizedBox(height: 20),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade50,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  "Enjoy a better life with PadiPay. Get free transfers, instant loans, and cashback rewards.",
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(color: Colors.grey.shade500),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildShimmerSkeleton() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SizedBox(height: 10),
+          Center(child: _Shimmer(width: 60, height: 60, borderRadius: 60)),
+          const SizedBox(height: 10),
+          Center(child: _Shimmer(width: 200, height: 28, borderRadius: 8)),
+          const SizedBox(height: 6),
+          Center(
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _Shimmer(width: 16, height: 16, borderRadius: 8),
+                const SizedBox(width: 6),
+                _Shimmer(width: 80, height: 12, borderRadius: 6),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          Divider(color: Colors.grey.shade300),
+          const SizedBox(height: 8),
+          _Shimmer(width: double.infinity, height: 14, borderRadius: 6),
+          const SizedBox(height: 10),
+          _Shimmer(width: double.infinity, height: 12),
+          const SizedBox(height: 8),
+          _Shimmer(width: double.infinity, height: 12),
+          const SizedBox(height: 16),
+          _Shimmer(width: double.infinity, height: 14, borderRadius: 6),
+          const SizedBox(height: 10),
+          _Shimmer(width: double.infinity, height: 12),
+          const SizedBox(height: 8),
+          _Shimmer(width: double.infinity, height: 12),
+          const SizedBox(height: 16),
+          _Shimmer(width: double.infinity, height: 80, borderRadius: 12),
+        ],
+      ),
+    );
+  }
+}
+
+// ----------------------------------------------------------------------
+//  Shimmer widget (unchanged)
+// ----------------------------------------------------------------------
+class _Shimmer extends StatefulWidget {
+  final double width;
+  final double height;
+  final double borderRadius;
+  const _Shimmer({
+    this.width = double.infinity,
+    this.height = 12,
+    this.borderRadius = 8,
+  });
+
+  @override
+  State<_Shimmer> createState() => _ShimmerState();
+}
+
+class _ShimmerState extends State<_Shimmer>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1500),
+    )..repeat();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _controller,
+      builder: (context, _) => Container(
+        width: widget.width,
+        height: widget.height,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(widget.borderRadius),
+          gradient: LinearGradient(
+            colors: [
+              Colors.grey.shade300,
+              Colors.grey.shade100,
+              Colors.grey.shade300,
+            ],
+            stops: [
+              (_controller.value - 0.3).clamp(0.0, 1.0),
+              _controller.value,
+              (_controller.value + 0.3).clamp(0.0, 1.0),
+            ],
+            begin: Alignment(-1, -0.3),
+            end: Alignment(1, 0.3),
           ),
         ),
       ),
@@ -928,31 +1370,32 @@ class _ReceiptPageState extends State<ReceiptPage> {
   }
 }
 
+// ----------------------------------------------------------------------
+//  Watermark painter (unchanged)
+// ----------------------------------------------------------------------
 class WatermarkPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     canvas.drawColor(Colors.white, BlendMode.srcOver);
-
     final textPainter = TextPainter(
-      text: const TextSpan(
+      text: TextSpan(
         text: 'PadiPay',
-        style: TextStyle(fontSize: 25, color: ui.Color.fromARGB(14, 0, 0, 0), fontWeight: FontWeight.w300),
+        style: GoogleFonts.inter(
+          fontSize: 25,
+          color: Colors.grey.withValues(alpha: 0.07),
+        ),
       ),
       textDirection: ui.TextDirection.ltr,
     );
-
     textPainter.layout();
-
     canvas.save();
     canvas.rotate(45 * math.pi / 180);
-
     const spacing = 100.0;
     for (double x = -size.width * 2; x < size.width * 2; x += spacing) {
       for (double y = -size.height * 2; y < size.height * 2; y += spacing) {
         textPainter.paint(canvas, Offset(x, y / 4));
       }
     }
-
     canvas.restore();
   }
 

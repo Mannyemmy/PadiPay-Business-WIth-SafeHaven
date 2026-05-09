@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_switch/flutter_switch.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:padi_pay_business/payment_successful_page.dart';
+import 'package:padi_pay_business/transfer/padi_aliases_page.dart';
 import 'package:padi_pay_business/ui/account_image_scanner.dart';
 import 'package:padi_pay_business/utils.dart';
 import 'package:uuid/uuid.dart';
@@ -17,14 +18,17 @@ class BankTransferPage extends StatefulWidget {
 
   @override
   State<BankTransferPage> createState() => _BankTransferPageState();
-} 
+}
 
 class _BankTransferPageState extends State<BankTransferPage> {
   final TextEditingController amountController = TextEditingController();
   final TextEditingController accountNumberController = TextEditingController();
   final TextEditingController remarkController = TextEditingController();
   final TextEditingController accountNameController = TextEditingController();
+
   String? selectedBank;
+  List<PadiAlias> _aliases = [];
+
   String? selectedBankName;
   List<Map<String, dynamic>> banks = [];
   bool sendAnonymously = false;
@@ -32,119 +36,603 @@ class _BankTransferPageState extends State<BankTransferPage> {
   bool isFetchingAccountName = false;
   bool isFetchingBanks = false;
   String? counterpartyId;
-  String feeText = "Fee: ₦50.00";
+  String feeText = "";
   List<Map<String, dynamic>> _recentTransfers = [];
   bool _loadingRecents = false;
   int _currentPage = 0; // 0: account details, 1: amount & remark
-  Future<void> _autoLookupCounterparty(String accountNumber) async {
-    debugPrint('🔍 _autoLookupCounterparty called with: $accountNumber');
-    if (accountNumber.length != 10) {
-      debugPrint('❌ Account number length is ${accountNumber.length}, not 10');
+
+  // ── Cached user data (preloaded once) ──────────────────────────────
+  Map<String, dynamic>? _cachedUserDoc;
+  double? _cachedBalance;
+  bool _isFetchingBalance = false;
+  String? _ownAccountNumber;
+  Map<String, dynamic>? _cachedCompanyVa;
+
+  @override
+  void initState() {
+    super.initState();
+    sendAnonymously = widget.initialGhostMode;
+    amountController.addListener(_updateFee);
+    _initAllParallel();
+  }
+
+  /// Preloads everything in parallel – no UI blocking.
+  Future<void> _initAllParallel() async {
+    await Future.wait([
+      _prefetchUserDoc(),
+      _fetchBanks(),
+      _loadAliases(),
+      _loadRecentTransfers(),
+    ]);
+  }
+
+  Future<void> _loadAliases() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .collection('padi_aliases')
+          .orderBy('alias')
+          .get();
+      if (mounted) {
+        setState(() {
+          _aliases = snapshot.docs.map(PadiAlias.fromDoc).toList();
+        });
+      }
+    } catch (e) {
+      debugPrint('loadAliases error: $e');
+    }
+  }
+
+  // ── User data (cached) ────────────────────────────────────────────
+  Future<void> _prefetchUserDoc() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .get();
+      _cachedUserDoc = doc.data();
+      _ownAccountNumber = _cachedUserDoc?['safehavenData']
+          ?['virtualAccount']?['data']?['attributes']?['accountNumber']
+          ?.toString();
+      _fetchAndCacheBalance();
+      _cachedCompanyVa = await getCompanyVirtualAccount();
+    } catch (e) {
+      debugPrint('_prefetchUserDoc error: $e');
+    }
+  }
+
+  Future<void> _fetchAndCacheBalance() async {
+    if (_isFetchingBalance) return;
+    _isFetchingBalance = true;
+    try {
+      final accountId = _cachedUserDoc?['safehavenData']
+          ?['virtualAccount']?['data']?['id']?.toString();
+      if (accountId == null || accountId.isEmpty) return;
+
+      final callable = FirebaseFunctions.instance.httpsCallable(
+        'safehavenFetchAccountBalance',
+      );
+      final result = await callable.call({'accountId': accountId});
+      final balanceKobo =
+          (result.data['data']['availableBalance'] as num?)?.toDouble() ?? 0.0;
+      _cachedBalance = balanceKobo / 100;
+      debugPrint('✅ Balance pre-fetched: ₦$_cachedBalance');
+    } catch (e) {
+      debugPrint('_fetchAndCacheBalance error: $e');
+    } finally {
+      _isFetchingBalance = false;
+    }
+  }
+
+  Future<double> _getBalance() async {
+    if (_cachedBalance != null) return _cachedBalance!;
+    await _fetchAndCacheBalance();
+    return _cachedBalance ?? 0.0;
+  }
+
+  Future<bool> _checkBalance(double amountNaira) async {
+    const fee = 50.0;
+    final totalRequired = amountNaira + fee;
+    final balance = await _getBalance();
+    if (balance < totalRequired) {
+      showSimpleDialog(
+        'Insufficient balance. Balance: ₦${balance.toStringAsFixed(2)}. '
+        'Required: ₦${totalRequired.toStringAsFixed(2)} (includes ₦50 fee)',
+        Colors.red,
+      );
+      return false;
+    }
+    return true;
+  }
+
+  // ── Bank list ─────────────────────────────────────────────────────
+  Future<void> _fetchBanks() async {
+    setState(() => isFetchingBanks = true);
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('banks')
+          .get();
+      if (snapshot.docs.isNotEmpty) {
+        setState(() {
+          banks = snapshot.docs.map((doc) => {
+            'id': doc.id,
+            'attributes': {'name': doc.data()['name']},
+          }).toList();
+          isFetchingBanks = false;
+        });
+        return;
+      }
+
+      // Fallback to cloud function
+      final result = await callCloudFunctionLogged(
+        'safehavenBankList',
+        source: 'bank_transfer_page.dart',
+      );
+      final apiBankList = (result.data as Map)['data'] as List<dynamic>;
+      final batch = FirebaseFirestore.instance.batch();
+      for (var item in apiBankList) {
+        final map = item as Map;
+        final docRef = FirebaseFirestore.instance
+            .collection('banks')
+            .doc(map['id'].toString());
+        batch.set(docRef, {'name': (map['attributes'] as Map)['name']?.toString()});
+        banks.add({
+          'id': map['id'].toString(),
+          'attributes': {'name': (map['attributes'] as Map)['name']?.toString()},
+        });
+      }
+      await batch.commit();
+      setState(() => isFetchingBanks = false);
+    } catch (e) {
+      debugPrint('safehavenBankList error: $e');
+      setState(() => isFetchingBanks = false);
+    }
+  }
+
+  // ── Account name enquiry with cache ───────────────────────────────
+  Future<void> _safehavenNameEnquiry() async {
+    if (accountNumberController.text.length != 10 || selectedBank == null) {
+      showSimpleDialog(
+        'Please enter valid account number and select a bank',
+        Colors.red,
+      );
+      return;
+    }
+
+    final docId = '${selectedBank}_${accountNumberController.text}';
+    final cached = await FirebaseFirestore.instance
+        .collection('verified_accounts')
+        .doc(docId)
+        .get();
+    if (cached.exists) {
+      setState(() => accountNameController.text = cached.data()!['accountName']);
       return;
     }
 
     setState(() => isFetchingAccountName = true);
     try {
-      // Search counterparties for matching account number across all users
-      debugPrint(
-        '🔎 Searching counterparties for recipientAccountNumber: $accountNumber',
+      final result = await callCloudFunctionLogged(
+        'safehavenNameEnquiry',
+        source: 'bank_transfer_page.dart',
+        payload: {
+          'accountNumber': accountNumberController.text,
+          'bankIdOrBankCode': selectedBank,
+        },
       );
+      final accountName = result.data['data']['attributes']['accountName'];
+      setState(() => accountNameController.text = accountName);
+      await FirebaseFirestore.instance
+          .collection('verified_accounts')
+          .doc(docId)
+          .set({
+            'accountName': accountName,
+            'verifiedAt': FieldValue.serverTimestamp(),
+          });
+    } catch (e) {
+      debugPrint('safehavenNameEnquiry error: $e');
+      showSimpleDialog('Error verifying account', Colors.red);
+    }
+    setState(() => isFetchingAccountName = false);
+  }
+
+  // ── Auto‑lookup from existing counterparties (cached) ─────────────
+  Future<void> _autoLookupCounterparty(String accountNumber) async {
+    if (accountNumber.length != 10) return;
+    setState(() => isFetchingAccountName = true);
+    try {
       final querySnapshot = await FirebaseFirestore.instance
           .collection('counterparties')
           .where('recipientAccountNumber', isEqualTo: accountNumber)
           .limit(1)
           .get();
 
-      debugPrint('📊 Query returned ${querySnapshot.docs.length} documents');
-
       if (querySnapshot.docs.isNotEmpty) {
-        final doc = querySnapshot.docs.first;
-        final data = doc.data();
-        debugPrint('📋 Document data: $data');
-
+        final data = querySnapshot.docs.first.data();
         String? bankId = data['recipientBankCode'] as String?;
-
-        // Try multiple paths for account name
-        final accountName =
-            data['data']?['attributes']?['accountName'] as String? ??
+        final accountName = data['data']?['attributes']?['accountName'] as String? ??
             data['attributes']?['accountName'] as String? ??
             data['accountName'] as String?;
-
-        debugPrint('🏦 Found bankId: $bankId');
-        debugPrint('👤 Found accountName: $accountName');
-
-        // Try to extract bank name if bankId is missing
         final bankName = data['bankName'] as String? ??
-                         data['data']?['attributes']?['bank']?['name'] as String?;
+            data['data']?['attributes']?['bank']?['name'] as String?;
 
-        debugPrint('🏦 Initial bankId: $bankId');
-        debugPrint('🏷️ bankName: $bankName');
-        debugPrint('👤 Found accountName: $accountName');
-
-        // If bankId is null but we have a bankName, try to resolve it via the banks collection
         if (bankId == null && bankName != null) {
-          debugPrint('🔁 bankId missing, trying banks collection lookup by bankName: $bankName');
-          try {
-            final bankQuery = await FirebaseFirestore.instance
-                .collection('banks')
-                .where('name', isEqualTo: bankName)
-                .limit(1)
-                .get();
-            if (bankQuery.docs.isNotEmpty) {
-              bankId = bankQuery.docs.first.id;
-              debugPrint('🔍 Found bankId by name (equal): $bankId');
-            } else {
-              final allBanks = await FirebaseFirestore.instance.collection('banks').get();
-              for (var bdoc in allBanks.docs) {
-                final bname = (bdoc.data()['name'] as String?) ?? '';
-                if (bname.toLowerCase() == bankName.toLowerCase()) {
-                  bankId = bdoc.id;
-                  debugPrint('🔍 Found bankId by case-insensitive match: $bankId');
-                  break;
-                }
-              }
-            }
-          } catch (e) {
-            debugPrint('bank lookup by name error: $e');
-          }
+          bankId = await _resolveBankIdByName(bankName);
         }
 
         if (bankId != null && accountName != null) {
-          debugPrint(
-            '✅ Setting selectedBank to: $bankId and accountName to: $accountName',
-          );
           setState(() {
             selectedBank = bankId;
+            selectedBankName = bankName;
             accountNameController.text = accountName;
-            isFetchingAccountName = false;
           });
+          setState(() => isFetchingAccountName = false);
           return;
-        } else {
-          debugPrint(
-            '⚠️ bankId or accountName is null. bankId=$bankId, accountName=$accountName',
-          );
         }
-      } else {
-        debugPrint(
-          '❌ No documents found for recipientAccountNumber: $accountNumber',
-        );
       }
     } catch (e) {
-      debugPrint('💥 _autoLookupCounterparty error: $e');
+      debugPrint('_autoLookupCounterparty error: $e');
     }
     setState(() => isFetchingAccountName = false);
   }
 
-  @override
-  void initState() {
-    super.initState();
-    // Honor initialGhostMode flag from caller
-    sendAnonymously = widget.initialGhostMode;
-    _fetchBanks();
-    amountController.addListener(_updateFee);
-    _loadRecentTransfers();
+  Future<String?> _resolveBankIdByName(String bankName) async {
+    try {
+      final q = await FirebaseFirestore.instance
+          .collection('banks')
+          .where('name', isEqualTo: bankName)
+          .limit(1)
+          .get();
+      if (q.docs.isNotEmpty) return q.docs.first.id;
+
+      // Fallback: search loaded banks list
+      for (final b in banks) {
+        final bname = (b['attributes']['name'] as String? ?? '').toLowerCase();
+        if (bname == bankName.toLowerCase()) return b['id'] as String;
+      }
+    } catch (e) {
+      debugPrint('_resolveBankIdByName error: $e');
+    }
+    return null;
   }
 
+  // ── Company VA (cached) ──────────────────────────────────────────
+  Future<Map<String, dynamic>?> getCompanyVirtualAccount() async {
+    try {
+      final docSnap = await FirebaseFirestore.instance
+          .collection('company')
+          .doc('account_details')
+          .get();
+      if (!docSnap.exists) return null;
+      final data = docSnap.data()!;
+      return {
+        'uid': data['uid']?.toString() ?? '',
+        'id': data['safehavenAccountId']?.toString() ?? data['accountId']?.toString() ?? '',
+        'type': data['safehavenAccountType']?.toString() ?? data['accountType']?.toString() ?? '',
+        'bankId': data['safehavenBankCode']?.toString() ?? data['bankId']?.toString() ?? '',
+        'bankName': data['safehavenBankName']?.toString() ?? data['bankName']?.toString() ?? '',
+        'accountNumber': data['safehavenAccountNumber']?.toString() ?? data['accountNumber']?.toString() ?? '',
+        'accountName': data['safehavenAccountName']?.toString() ?? data['accountName']?.toString() ?? '',
+      };
+    } catch (e) {
+      debugPrint('getCompanyVirtualAccount error: $e');
+      return null;
+    }
+  }
+
+  // ── Create counterparty (reuse) ──────────────────────────────────
+  Future<void> _createCounterparty() async {
+    if (accountNameController.text.isEmpty || selectedBank == null) {
+      showToast('Please verify account details', Colors.red);
+      return;
+    }
+
+    setState(() => isLoading = true);
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      final details = await getCurrentAccountIdAndType();
+      final String? accountId = details['accountId'];
+      final String? accountType = details['accountType'];
+
+      String? resolvedBankId = selectedBank;
+      if (resolvedBankId == null && selectedBankName != null) {
+        resolvedBankId = await _resolveBankIdByName(selectedBankName!);
+      }
+      if (resolvedBankId == null) throw Exception('Bank ID not found');
+
+      final existing = await FirebaseFirestore.instance
+          .collection('counterparties')
+          .where('userId', isEqualTo: user.uid)
+          .where('recipientAccountNumber', isEqualTo: accountNumberController.text)
+          .where('recipientBankCode', isEqualTo: resolvedBankId)
+          .limit(1)
+          .get();
+
+      if (existing.docs.isNotEmpty) {
+        setState(() => counterpartyId = existing.docs.first.id);
+        setState(() => isLoading = false);
+        return;
+      }
+
+      final bank = banks.firstWhere((b) => b['id'] == resolvedBankId);
+      final result = await callCloudFunctionLogged(
+        'safehavenCreateCounterparty',
+        source: 'bank_transfer_page.dart',
+        payload: {
+          'accountId': accountId,
+          'bankId': resolvedBankId,
+          'accountType': accountType,
+          'accountName': accountNameController.text,
+          'bankName': bank['attributes']['name'],
+          'accountNumber': accountNumberController.text,
+          'bankCode': resolvedBankId,
+        },
+      );
+      final cpId = result.data['data']['id'];
+      await FirebaseFirestore.instance.collection('counterparties').doc(cpId).set({
+        ...result.data,
+        'userId': user.uid,
+        'recipientAccountNumber': accountNumberController.text,
+        'recipientBankCode': resolvedBankId,
+        'ownerAccountId': accountId,
+      });
+      setState(() => counterpartyId = cpId);
+    } catch (e) {
+      debugPrint('createCounterparty error: $e');
+      showSimpleDialog('Error creating counterparty', Colors.red);
+    }
+    setState(() => isLoading = false);
+  }
+
+  // ── NIP Transfer (external) ──────────────────────────────────────
+  Future<void> _safehavenTransferNip() async {
+    if (counterpartyId == null || amountController.text.isEmpty) {
+      showSimpleDialog('Please complete all fields', Colors.red);
+      return;
+    }
+    final amountNaira = double.parse(amountController.text);
+    if (!await _checkBalance(amountNaira)) return;
+
+    final pinVerified = await verifyTransactionPin();
+    if (!pinVerified) return;
+
+    setState(() => isLoading = true);
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      final details = await getCurrentAccountIdAndType();
+      final String? accountId = details['accountId'];
+      final String? accountType = details['accountType'];
+
+      final result = await callCloudFunctionLogged(
+        'safehavenTransferNip',
+        source: 'bank_transfer_page.dart',
+        payload: {
+          'accountType': accountType,
+          'accountId': accountId,
+          'counterpartyId': counterpartyId,
+          'amount': amountNaira * 100,
+          'currency': 'NGN',
+          'narration': remarkController.text,
+          'idempotencyKey': const Uuid().v4(),
+        },
+      );
+      final status = result.data['data']['attributes']['status'];
+      final failureReason = result.data['data']['attributes']['failureReason'];
+      if (status == "FAILED") {
+        showSimpleDialog('Transfer failed: $failureReason', Colors.red);
+        setState(() => isLoading = false);
+        return;
+      }
+
+      final bank = banks.cast<Map<String, dynamic>?>().firstWhere(
+        (b) => b?['id'] == selectedBank,
+        orElse: () => null,
+      )!;
+      await FirebaseFirestore.instance.collection('transactions').add({
+        'userId': user.uid,
+        'type': 'transfer',
+        'bank_code': selectedBank,
+        'account_number': accountNumberController.text,
+        'amount': amountNaira,
+        'reason': remarkController.text,
+        'currency': 'NGN',
+        'api_response': result.data,
+        'reference': result.data['data']['id'],
+        'recipientName': accountNameController.text,
+        'bankName': bank['attributes']['name'],
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      showModalBottomSheet(
+        context: context,
+        builder: (context) => PaymentSuccessfulPage(
+          amount: amountController.text,
+          actionText: "Done",
+          title: "Payment Successful",
+          description: "Your transfer has been processed successfully.",
+          recipientName: accountNameController.text,
+          bankName: bank['attributes']['name'] ?? 'Unknown Bank',
+          bankCode: selectedBank ?? '',
+          accountNumber: accountNumberController.text,
+          reference: result.data['data']['id'] ?? "",
+        ),
+        isScrollControlled: true,
+      );
+    } catch (e) {
+      debugPrint('safehavenTransferNip error: $e');
+      showSimpleDialog('Error processing transfer', Colors.red);
+    }
+    setState(() => isLoading = false);
+  }
+
+  // ── Ghost Transfer (anonymous) ───────────────────────────────────
+  Future<void> _ghostTransfer() async {
+    if (amountController.text.isEmpty ||
+        accountNameController.text.isEmpty ||
+        selectedBank == null) {
+      showSimpleDialog(
+        'Please complete all fields and verify account',
+        Colors.red,
+      );
+      return;
+    }
+    final amountNaira = double.parse(amountController.text);
+    if (!await _checkBalance(amountNaira)) return;
+
+    final pinVerified = await verifyTransactionPin();
+    if (!pinVerified) return;
+
+    setState(() => isLoading = true);
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) throw Exception('User not authenticated');
+
+      final details = await getCurrentAccountIdAndType();
+      final String? userAccountId = details['accountId'];
+      final String? userAccountType = details['accountType'];
+
+      final companyVa = _cachedCompanyVa ?? await getCompanyVirtualAccount();
+      if (companyVa == null || companyVa['id'].isEmpty) {
+        throw Exception('Company account not found');
+      }
+
+      // 1️⃣ User → Company (INTRA transfer)
+      final intraResult = await callCloudFunctionLogged(
+        'safehavenTransferIntra',
+        source: 'bank_transfer_page.dart',
+        payload: {
+          'fromAccountId': userAccountId,
+          'toAccountId': companyVa['id'],
+          'amount': (amountNaira + 50.0) * 100,
+          'narration': 'Ghost Mode: ${remarkController.text.isNotEmpty ? remarkController.text : 'Transfer'}',
+          'idempotencyKey': const Uuid().v4(),
+        },
+      );
+      if (intraResult.data['data']['attributes']['status'] == 'FAILED') {
+        showSimpleDialog(
+          'Transfer to company failed: ${intraResult.data['data']['attributes']['failureReason']}',
+          Colors.red,
+        );
+        setState(() => isLoading = false);
+        return;
+      }
+
+      final recipientAccountNumber = accountNumberController.text;
+      final recipientBankId = selectedBank;
+      final recipientBank = banks.cast<Map<String, dynamic>?>().firstWhere(
+        (b) => b?['id'] == selectedBank,
+        orElse: () => null,
+      )!;
+      final recipientBankName = recipientBank['attributes']['name'] as String? ?? 'Unknown Bank';
+      final recipientAccountName = accountNameController.text;
+
+      String recipientCounterpartyId;
+      final existingCp = await FirebaseFirestore.instance
+          .collection('counterparties')
+          .where('ownerAccountId', isEqualTo: companyVa['id'])
+          .where('recipientAccountNumber', isEqualTo: recipientAccountNumber)
+          .where('recipientBankCode', isEqualTo: recipientBankId)
+          .limit(1)
+          .get();
+      if (existingCp.docs.isNotEmpty) {
+        recipientCounterpartyId = existingCp.docs.first.id;
+      } else {
+        final cpResult = await callCloudFunctionLogged(
+          'safehavenCreateCounterparty',
+          source: 'bank_transfer_page.dart',
+          payload: {
+            'accountId': companyVa['id'],
+            'bankId': recipientBankId,
+            'accountType': companyVa['type'],
+            'accountName': recipientAccountName,
+            'bankName': recipientBankName,
+            'accountNumber': recipientAccountNumber,
+            'bankCode': recipientBankId,
+          },
+        );
+        recipientCounterpartyId = cpResult.data['data']['id'];
+        await FirebaseFirestore.instance
+            .collection('counterparties')
+            .doc(recipientCounterpartyId)
+            .set({
+              ...cpResult.data,
+              'userId': companyVa['uid'],
+              'recipientAccountNumber': recipientAccountNumber,
+              'recipientBankCode': recipientBankId,
+              'ownerAccountId': companyVa['id'],
+            });
+      }
+
+      // 3️⃣ Company → Recipient (NIP transfer)
+      final nipResult = await callCloudFunctionLogged(
+        'safehavenTransferNip',
+        source: 'bank_transfer_page.dart',
+        payload: {
+          'accountType': companyVa['type'],
+          'accountId': companyVa['id'],
+          'counterpartyId': recipientCounterpartyId,
+          'amount': amountNaira * 100,
+          'currency': 'NGN',
+          'narration': remarkController.text.isNotEmpty ? remarkController.text : 'Ghost Mode Transfer',
+          'idempotencyKey': const Uuid().v4(),
+        },
+      );
+      if (nipResult.data['data']['attributes']['status'] == 'FAILED') {
+        showSimpleDialog(
+          'Transfer to recipient failed: ${nipResult.data['data']['attributes']['failureReason']}',
+          Colors.red,
+        );
+        setState(() => isLoading = false);
+        return;
+      }
+
+      await FirebaseFirestore.instance.collection('transactions').add({
+        'actualSender': user.uid,
+        'userId': user.uid,
+        'type': 'ghost_transfer',
+        'bank_code': recipientBankId,
+        'account_number': recipientAccountNumber,
+        'amount': amountNaira,
+        'reason': remarkController.text,
+        'currency': 'NGN',
+        'api_response': nipResult.data,
+        'reference': nipResult.data['data']['id'],
+        'recipientName': recipientAccountName,
+        'bankName': recipientBankName,
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+
+      showModalBottomSheet(
+        context: context,
+        builder: (context) => PaymentSuccessfulPage(
+          amount: amountController.text,
+          actionText: "Done",
+          title: "Payment Successful",
+          description: "Your transfer has been processed successfully.",
+          recipientName: recipientAccountName,
+          bankName: recipientBankName,
+          bankCode: recipientBankId ?? '',
+          accountNumber: recipientAccountNumber,
+          reference: nipResult.data['data']['id'] ?? "",
+        ),
+        isScrollControlled: true,
+      );
+    } catch (e) {
+      debugPrint('ghostTransfer error: $e');
+      showSimpleDialog('Error processing ghost transfer', Colors.red);
+    }
+    setState(() => isLoading = false);
+  }
+
+  // ── Recent transfers ─────────────────────────────────────────────
   Future<void> _loadRecentTransfers() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
@@ -178,21 +666,20 @@ class _BankTransferPageState extends State<BankTransferPage> {
     if (mounted) setState(() => _loadingRecents = false);
   }
 
+  // ── Scan from image ──────────────────────────────────────────────
   Future<void> _onScanAccountImage() async {
     final result = await scanAccountFromImage(context);
     if (result == null) return;
-
     if (result.accountNumber != null && result.accountNumber!.isNotEmpty) {
-      setState(() {
-        accountNumberController.text = result.accountNumber!;
-      });
+      setState(() => accountNumberController.text = result.accountNumber!);
     }
-
-    if (result.bankName != null && result.bankName!.isNotEmpty && banks.isNotEmpty) {
+    if (result.bankName != null &&
+        result.bankName!.isNotEmpty &&
+        banks.isNotEmpty) {
       final bankNameLower = result.bankName!.toLowerCase();
       final matched = banks.cast<Map<String, dynamic>?>().firstWhere(
         (b) => (b!['attributes']['name'] as String).toLowerCase().contains(bankNameLower) ||
-               bankNameLower.contains((b['attributes']['name'] as String).toLowerCase()),
+            bankNameLower.contains((b['attributes']['name'] as String).toLowerCase()),
         orElse: () => null,
       );
       if (matched != null) {
@@ -202,585 +689,20 @@ class _BankTransferPageState extends State<BankTransferPage> {
         });
       }
     }
-
     if (accountNumberController.text.length == 10) {
       _autoLookupCounterparty(accountNumberController.text);
-      if (selectedBank != null) _sudoNameEnquiry();
+      if (selectedBank != null) _safehavenNameEnquiry();
     }
   }
 
   void _updateFee() {
     final amount = double.tryParse(amountController.text) ?? 0.0;
-    final fee = amount > 0 ? 50.0 : 0.0;
     setState(() {
-      feeText = "Fee: ₦${fee.toStringAsFixed(2)}";
+      feeText = amount > 0 ? "Fee: ₦50.00" : "";
     });
   }
 
-  Future<void> _fetchBanks() async {
-    setState(() => isFetchingBanks = true);
-    try {
-      final snapshot = await FirebaseFirestore.instance
-          .collection('banks')
-          .get();
-      List<Map<String, dynamic>> bankList = [];
-      for (var doc in snapshot.docs) {
-        bankList.add({
-          'id': doc.id,
-          'attributes': {'name': doc.data()['name']},
-        });
-      }
-      if (bankList.isEmpty) {
-        final result = await callCloudFunctionLogged(
-          'sudoBankList',
-          source: 'bank_transfer_page.dart',
-        );
-        final data = result.data as Map<String, dynamic>;
-        final apiBankList = data['data'] as List<dynamic>;
-        final batch = FirebaseFirestore.instance.batch();
-        for (var item in apiBankList) {
-          final map = item as Map;
-          final docRef = FirebaseFirestore.instance
-              .collection('banks')
-              .doc(map['id'].toString());
-          batch.set(docRef, {
-            'name': (map['attributes'] as Map)['name']?.toString(),
-          });
-        }
-        await batch.commit();
-        final newSnapshot = await FirebaseFirestore.instance
-            .collection('banks')
-            .get();
-        for (var doc in newSnapshot.docs) {
-          bankList.add({
-            'id': doc.id,
-            'attributes': {'name': doc.data()['name']},
-          });
-        }
-      }
-      setState(() {
-        banks = bankList;
-        isFetchingBanks = false;
-      });
-    } catch (e) {
-      debugPrint('sudoBankList error: $e');
-      setState(() => isFetchingBanks = false);
-    }
-  }
-
-  Future<void> _sudoNameEnquiry() async {
-    if (accountNumberController.text.length != 10 || selectedBank == null) {
-      showSimpleDialog(
-        'Please enter valid account number and select a bank',
-        Colors.red,
-      );
-      return;
-    }
-
-    final docId = '${selectedBank}_${accountNumberController.text}';
-    final doc = await FirebaseFirestore.instance
-        .collection('verified_accounts')
-        .doc(docId)
-        .get();
-
-    if (doc.exists) {
-      setState(() {
-        accountNameController.text = doc.data()!['accountName'];
-      });
-      return;
-    }
-
-    setState(() => isLoading = true);
-    try {
-      final result = await callCloudFunctionLogged(
-          'sudoNameEnquiry',
-          source: 'bank_transfer_page.dart',
-          payload: {
-            'accountNumber': accountNumberController.text,
-            'bankIdOrBankCode': selectedBank,
-          });
-      final accountName = result.data['data']['attributes']['accountName'];
-      setState(() {
-        accountNameController.text = accountName;
-      });
-      await FirebaseFirestore.instance
-          .collection('verified_accounts')
-          .doc(docId)
-          .set({
-            'accountName': accountName,
-            'verifiedAt': FieldValue.serverTimestamp(),
-          });
-    } catch (e) {
-      debugPrint('sudoNameEnquiry error: $e');
-      showSimpleDialog('Error verifying account', Colors.red);
-    }
-    setState(() => isLoading = false);
-  }
-
-  Future<Map<String, dynamic>?> getCompanyVirtualAccount() async {
-    try {
-      final docSnap = await FirebaseFirestore.instance
-          .collection('company')
-          .doc('account_details')
-          .get();
-      if (!docSnap.exists) return null;
-      final data = docSnap.data()!;
-      return {
-        'uid': data['uid']?.toString() ?? '',
-        'id': data['accountId']?.toString() ?? '',
-        'type': data['accountType']?.toString() ?? '',
-        'bankId': data['bankId']?.toString() ?? '',
-        'bankName': data['bankName']?.toString() ?? '',
-        'accountNumber': data['accountNumber']?.toString() ?? '',
-        'accountName': data['accountName']?.toString() ?? '',
-      };
-    } catch (e) {
-      debugPrint('getCompanyVirtualAccount error: $e');
-      return null;
-    }
-  }
-
-  Future<void> _createCounterparty() async {
-    if (accountNameController.text.isEmpty || selectedBank == null) {
-      showToast('Please verify account details', Colors.red);
-      return;
-    }
-
-    setState(() => isLoading = true);
-    try {
-      final bank = banks.firstWhere((b) => b['id'] == selectedBank);
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) {
-        showToast('No authenticated user found', Colors.red);
-        setState(() => isLoading = false);
-        return;
-      }
-
-      final details = await getCurrentAccountIdAndType();
-      final String accountId = details['accountId'] ?? '';
-      final String? accountType = details['accountType'];
-
-      // Determine recipient bank id (selected bank)
-      String? recipientBankId = selectedBank;
-      String? recipientBankNameLocal = selectedBankName;
-      if ((recipientBankId == null || recipientBankId.isEmpty) && recipientBankNameLocal != null && recipientBankNameLocal.isNotEmpty) {
-        final resolved = await resolveBankIdByName(recipientBankNameLocal);
-        if (resolved != null) {
-          recipientBankId = resolved;
-          debugPrint('Resolved recipient bankId by name: $recipientBankId');
-        }
-      }
-
-      if (accountId.isEmpty) {
-        showToast('Account ID not found', Colors.red);
-        setState(() => isLoading = false);
-        return;
-      }
-      if (recipientBankId == null || recipientBankId.isEmpty) {
-        showToast('Bank ID not found', Colors.red);
-        setState(() => isLoading = false);
-        return;
-      }
-      if (accountType == null) {
-        showToast('Account Type not found', Colors.red);
-        setState(() => isLoading = false);
-        return;
-      }
-
-      // Check if counterparty already exists
-      final query = await FirebaseFirestore.instance
-          .collection('counterparties')
-          .where('userId', isEqualTo: user.uid)
-          .where(
-            'recipientAccountNumber',
-            isEqualTo: accountNumberController.text,
-          )
-          .where('recipientBankCode', isEqualTo: recipientBankId)
-          .limit(1)
-          .get();
-
-      if (query.docs.isNotEmpty) {
-        setState(() {
-          counterpartyId = query.docs.first.id;
-        });
-        setState(() => isLoading = false);
-        return;
-      }
-
-      final result = await callCloudFunctionLogged(
-          'sudoCreateCounterparty',
-          source: 'bank_transfer_page.dart',
-          payload: {
-            'accountId': accountId,
-            'bankId': recipientBankId,
-            'accountType': accountType,
-            'accountName': accountNameController.text,
-            'bankName': recipientBankNameLocal ?? bank['attributes']['name'],
-            'accountNumber': accountNumberController.text,
-            'bankCode': recipientBankId,
-          });
-      final counterpartyIdd = result.data['data']['id'];
-      await FirebaseFirestore.instance
-          .collection('counterparties')
-          .doc(counterpartyIdd)
-          .set({
-            ...result.data,
-            'userId': user.uid,
-            'recipientAccountNumber': accountNumberController.text,
-            'recipientBankCode': recipientBankId,
-            'ownerAccountId': accountId,
-          });
-      setState(() {
-        counterpartyId = counterpartyIdd;
-      });
-    } catch (e) {
-      debugPrint('createCounterparty error: $e');
-      showSimpleDialog('Error creating counterparty', Colors.red);
-    }
-    setState(() => isLoading = false);
-  }
-
-  Future<void> _sudoTransferNip() async {
-    if (counterpartyId == null || amountController.text.isEmpty) {
-      showSimpleDialog('Please complete all fields', Colors.red);
-      return;
-    }
-
-    // Verify PIN before proceeding
-    final pinVerified = await verifyTransactionPin();
-    if (!pinVerified) return;
-
-    setState(() => isLoading = true);
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) {
-        showSimpleDialog('No authenticated user found', Colors.red);
-        setState(() => isLoading = false);
-        return;
-      }
-
-      final details = await getCurrentAccountIdAndType();
-      final String? accountId = details['accountId'];
-      final String? accountType = details['accountType'];
-
-      if (accountId == null || accountId.isEmpty) {
-        showSimpleDialog('Account ID not found', Colors.red);
-        setState(() => isLoading = false);
-        return;
-      }
-      if (accountType == null) {
-        showSimpleDialog('Account Type not found', Colors.red);
-        setState(() => isLoading = false);
-        return;
-      }
-
-        final result = await callCloudFunctionLogged(
-          'sudoTransferNip',
-          source: 'bank_transfer_page.dart',
-          payload: {
-            'accountType': accountType,
-            'accountId': accountId,
-            'counterpartyId': counterpartyId,
-            'amount': double.parse(amountController.text) * 100,
-            'currency': 'NGN',
-            'narration': remarkController.text,
-            'idempotencyKey': const Uuid().v4(),
-          });
-      final status = result.data['data']['attributes']['status'];
-      final failureReason = result.data['data']['attributes']['failureReason'];
-      if (status == "FAILED") {
-        showSimpleDialog('Transfer failed: $failureReason', Colors.red);
-        setState(() => isLoading = false);
-
-        return;
-      }
-
-      final bank = banks.firstWhere((b) => b['id'] == selectedBank);
-      await FirebaseFirestore.instance.collection('transactions').add({
-        'userId': user.uid,
-        'type': 'transfer',
-        'bank_code': selectedBank,
-        'account_number': accountNumberController.text,
-        'amount': double.parse(amountController.text),
-        'reason': remarkController.text,
-        'currency': 'NGN',
-        'api_response': result.data,
-        'reference': result.data['data']['id'],
-        'recipientName': accountNameController.text,
-        'bankName': bank['attributes']['name'],
-        'timestamp': FieldValue.serverTimestamp(),
-      });
-
-      showModalBottomSheet(
-        context: context,
-        builder: (context) => PaymentSuccessfulPage(
-          amount: amountController.text,
-          actionText: "Done",
-          title: "Payment Successful",
-          description: "Your transfer has been processed successfully.",
-          recipientName: accountNameController.text,
-          bankName: bank['attributes']['name'] ?? 'Unknown Bank',
-          bankCode: selectedBank ?? '',
-          accountNumber: accountNumberController.text,
-          reference: result.data['data']['id'] ?? "",
-        ),
-        isScrollControlled: true,
-      );
-    } catch (e) {
-      debugPrint('sudoTransferNip error: $e');
-      showSimpleDialog('Error processing transfer', Colors.red);
-    }
-    setState(() => isLoading = false);
-  }
-
-  Future<void> _ghostTransfer() async {
-    if (amountController.text.isEmpty ||
-        accountNameController.text.isEmpty ||
-        selectedBank == null) {
-      showSimpleDialog('Please complete all fields and verify account', Colors.red);
-      return;
-    }
-
-    // Verify PIN before proceeding
-    final pinVerified = await verifyTransactionPin();
-    if (!pinVerified) return;
-
-    setState(() => isLoading = true);
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user == null) {
-        showSimpleDialog('No authenticated user found', Colors.red);
-        setState(() => isLoading = false);
-        return;
-      }
-
-      final details = await getCurrentAccountIdAndType();
-      final String? userAccountId = details['accountId'];
-      final String? userAccountType = details['accountType'];
-      String? userBankId = details['bankId'];
-      final String? userBankName = details['bankName'];
-
-      // If bank id is missing, try resolving it by bank name
-      if ((userBankId == null || userBankId.isEmpty) && userBankName != null && userBankName.isNotEmpty) {
-        final resolved = await resolveBankIdByName(userBankName);
-        if (resolved != null && resolved.isNotEmpty) {
-          userBankId = resolved;
-          debugPrint('Resolved user bankId by name: $userBankId');
-        } else {
-          debugPrint('Could not resolve user bankId for bankName: $userBankName');
-        }
-      }
-
-      if (userAccountId == null || userAccountId.isEmpty) {
-        showSimpleDialog('User account id not found', Colors.red);
-        setState(() => isLoading = false);
-        return;
-      }
-      if (userAccountType == null || userAccountType.isEmpty) {
-        showSimpleDialog('User account type not found', Colors.red);
-        setState(() => isLoading = false);
-        return;
-      }
-      if (userBankId == null || userBankId.isEmpty) {
-        showSimpleDialog('User bank id not found (bank: ${userBankName ?? 'unknown'})', Colors.red);
-        setState(() => isLoading = false);
-        return;
-      }
-
-      final companyVa = await getCompanyVirtualAccount();
-      if (companyVa == null ||
-          companyVa['id'].isEmpty ||
-          companyVa['type'].isEmpty ||
-          companyVa['bankId'].isEmpty ||
-          companyVa['accountNumber'].isEmpty) {
-        showSimpleDialog('Company account not found', Colors.red);
-        setState(() => isLoading = false);
-        return;
-      }
-
-      final recipientAccountNumber = accountNumberController.text;
-      final recipientBankId = selectedBank;
-      final recipientBankName = banks.firstWhere(
-        (b) => b['id'] == selectedBank,
-      )['attributes']['name'];
-      final recipientAccountName = accountNameController.text;
-
-      // Check/create counterparty for company (from user)
-      final companyAccountNumber = companyVa['accountNumber'];
-      final companyBankCode = companyVa['bankId'];
-      final queryCompanyCp = await FirebaseFirestore.instance
-          .collection('counterparties')
-          .where('userId', isEqualTo: user.uid)
-          .where('recipientAccountNumber', isEqualTo: companyAccountNumber)
-          .where('recipientBankCode', isEqualTo: companyBankCode)
-          .limit(1)
-          .get();
-
-      String companyCounterpartyId;
-      if (queryCompanyCp.docs.isNotEmpty) {
-        companyCounterpartyId = queryCompanyCp.docs.first.id;
-      } else {
-        final createCompanyCpResult = await callCloudFunctionLogged(
-          'sudoCreateCounterparty',
-          source: 'bank_transfer_page.dart',
-          payload: {
-              'accountId': userAccountId,
-              'bankId': companyVa['bankId'], // recipient (company) bank id
-              'accountType': userAccountType,
-              'accountName': companyVa['accountName'],
-              'bankName': companyVa['bankName'],
-              'accountNumber': companyVa['accountNumber'],
-              'bankCode': companyVa['bankId'],
-            });
-        companyCounterpartyId = createCompanyCpResult.data['data']['id'];
-        await FirebaseFirestore.instance
-            .collection('counterparties')
-            .doc(companyCounterpartyId)
-            .set({
-              ...createCompanyCpResult.data,
-              'userId': user.uid,
-              'recipientAccountNumber': companyVa['accountNumber'],
-              'recipientBankCode': companyVa['bankId'],
-              'ownerAccountId': userAccountId,
-            });
-      }
-
-      // First transfer: user to company
-      final amountNaira = double.parse(amountController.text);
-      final fee = 50.0;
-      final amountToCompanyKobo = (amountNaira + fee) * 100;
-      final narration1 =
-          'Ghost Mode to Company: ${remarkController.text.isNotEmpty ? remarkController.text : 'Transfer'}';
-        final firstResult = await callCloudFunctionLogged(
-          'sudoTransferNip',
-          source: 'bank_transfer_page.dart',
-          payload: {
-            'accountType': userAccountType,
-            'accountId': userAccountId,
-            'counterpartyId': companyCounterpartyId,
-            'amount': amountToCompanyKobo,
-            'currency': 'NGN',
-            'narration': narration1,
-            'idempotencyKey': const Uuid().v4(),
-          });
-      final firstStatus = firstResult.data['data']['attributes']['status'];
-      final firstFailureReason =
-          firstResult.data['data']['attributes']['failureReason'];
-      if (firstStatus == "FAILED") {
-        showSimpleDialog(
-          'Transfer to company failed: $firstFailureReason',
-          Colors.red,
-        );
-        setState(() => isLoading = false);
-        return;
-      }
-
-      // Check/create counterparty for recipient (from company)
-      final queryRecipientCp = await FirebaseFirestore.instance
-          .collection('counterparties')
-          .where('ownerAccountId', isEqualTo: companyVa['id'])
-          .where('recipientAccountNumber', isEqualTo: recipientAccountNumber)
-          .where('recipientBankCode', isEqualTo: recipientBankId)
-          .limit(1)
-          .get();
-
-      String recipientCounterpartyId;
-      if (queryRecipientCp.docs.isNotEmpty) {
-        recipientCounterpartyId = queryRecipientCp.docs.first.id;
-      } else {
-        final createRecipientCpResult = await callCloudFunctionLogged(
-          'sudoCreateCounterparty',
-          source: 'bank_transfer_page.dart',
-          payload: {
-              'accountId': companyVa['id'],
-              'bankId': recipientBankId, // recipient's bank id
-              'accountType': companyVa['type'],
-              'accountName': recipientAccountName,
-              'bankName': recipientBankName,
-              'accountNumber': recipientAccountNumber,
-              'bankCode': recipientBankId,
-            });
-        recipientCounterpartyId = createRecipientCpResult.data['data']['id'];
-        await FirebaseFirestore.instance
-            .collection('counterparties')
-            .doc(recipientCounterpartyId)
-            .set({
-              ...createRecipientCpResult.data,
-              'userId': companyVa['uid'],
-              'recipientAccountNumber': recipientAccountNumber,
-              'recipientBankCode': recipientBankId,
-              'ownerAccountId': companyVa['id'],
-            });
-      }
-
-      // Second transfer: company to recipient
-      final amountToRecipientKobo = amountNaira * 100;
-      final narration2 = remarkController.text.isNotEmpty
-          ? remarkController.text
-          : 'Ghost Mode Transfer';
-        final secondResult = await callCloudFunctionLogged(
-          'sudoTransferNip',
-          source: 'bank_transfer_page.dart',
-          payload: {
-            'accountType': companyVa['type'],
-            'accountId': companyVa['id'],
-            'counterpartyId': recipientCounterpartyId,
-            'amount': amountToRecipientKobo,
-            'currency': 'NGN',
-            'narration': narration2,
-            'idempotencyKey': const Uuid().v4(),
-          });
-      final secondStatus = secondResult.data['data']['attributes']['status'];
-      final secondFailureReason =
-          secondResult.data['data']['attributes']['failureReason'];
-      if (secondStatus == "FAILED") {
-        showSimpleDialog(
-          'Transfer to recipient failed: $secondFailureReason',
-          Colors.red,
-        );
-        setState(() => isLoading = false);
-        return;
-      }
-
-      // Log transaction
-      await FirebaseFirestore.instance.collection('transactions').add({
-        'actualSender': user.uid,
-        'userId': "JfUPEtiWDDYZ3QMHRwEfewo96r12",
-        'type': 'ghost_transfer',
-        'bank_code': recipientBankId,
-        'account_number': recipientAccountNumber,
-        'amount': amountNaira,
-        'reason': remarkController.text,
-        'currency': 'NGN',
-        'api_response': secondResult.data,
-        'reference': secondResult.data['data']['id'],
-        'recipientName': recipientAccountName,
-        'bankName': recipientBankName,
-        'timestamp': FieldValue.serverTimestamp(),
-      });
-
-      showModalBottomSheet(
-        context: context,
-        builder: (context) => PaymentSuccessfulPage(
-          amount: amountController.text,
-          actionText: "Done",
-          title: "Payment Successful",
-          description: "Your transfer has been processed successfully.",
-          recipientName: recipientAccountName,
-          bankName: recipientBankName ?? 'Unknown Bank',
-          bankCode: recipientBankId ?? '',
-          accountNumber: recipientAccountNumber,
-          reference: secondResult.data['data']['id'] ?? "",
-        ),
-        isScrollControlled: true,
-      );
-    } catch (e) {
-      debugPrint('ghostTransfer error: $e');
-      showSimpleDialog('Error processing ghost transfer', Colors.red);
-    }
-    setState(() => isLoading = false);
-  }
-
+  // ── Lifecycle ────────────────────────────────────────────────────
   @override
   void dispose() {
     amountController.removeListener(_updateFee);
@@ -791,6 +713,7 @@ class _BankTransferPageState extends State<BankTransferPage> {
     super.dispose();
   }
 
+  // ── UI ───────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -804,7 +727,7 @@ class _BankTransferPageState extends State<BankTransferPage> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    SizedBox(height: 20),
+                    const SizedBox(height: 20),
                     Row(
                       children: [
                         InkWell(
@@ -815,26 +738,17 @@ class _BankTransferPageState extends State<BankTransferPage> {
                               setState(() => _currentPage = 0);
                             }
                           },
-                          child: Icon(
-                            Icons.arrow_back_ios,
-                            color: Colors.black87,
-                            size: 20,
-                          ),
+                          child: const Icon(Icons.arrow_back_ios, color: Colors.black87, size: 20),
                         ),
-                        Spacer(),
-                        Text(
+                        const Spacer(),
+                        const Text(
                           "Bank Transfer",
-                          style: TextStyle(
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.black,
-                          ),
+                          style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.black),
                         ),
-                        Spacer(),
+                        const Spacer(),
                       ],
                     ),
-                    SizedBox(height: 30),
-                    // PAGE 0: Account details
+                    const SizedBox(height: 30),
                     if (_currentPage == 0) ...[
                       const Text('Beneficiary Account Number'),
                       const SizedBox(height: 8),
@@ -846,9 +760,7 @@ class _BankTransferPageState extends State<BankTransferPage> {
                         decoration: InputDecoration(
                           counterText: "",
                           hintStyle: TextStyle(color: Colors.grey.shade600),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                           hintText: 'Account number',
                           suffixIcon: IconButton(
                             tooltip: 'Scan account details from photo',
@@ -859,9 +771,7 @@ class _BankTransferPageState extends State<BankTransferPage> {
                         onChanged: (value) {
                           if (value.length == 10) {
                             _autoLookupCounterparty(value);
-                            if (selectedBank != null) {
-                              _sudoNameEnquiry();
-                            }
+                            if (selectedBank != null) _safehavenNameEnquiry();
                           }
                         },
                       ),
@@ -869,96 +779,55 @@ class _BankTransferPageState extends State<BankTransferPage> {
                       const Text('Beneficiary Bank'),
                       const SizedBox(height: 8),
                       isFetchingBanks
-                          ? Center(
-                              child: CircularProgressIndicator(
-                                color: primaryColor,
-                              ),
-                            )
+                          ? Center(child: CircularProgressIndicator(color: primaryColor))
                           : DropdownSearch<String>(
                               popupProps: PopupProps.menu(
-                                menuProps: MenuProps(
-                                  backgroundColor: Colors.white,
-                                ),
+                                menuProps: const MenuProps(backgroundColor: Colors.white),
                                 searchFieldProps: TextFieldProps(
                                   decoration: InputDecoration(
                                     hintText: "Search bank...",
-                                    hintStyle: TextStyle(fontSize: 14),
-                                    border: OutlineInputBorder(
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    contentPadding: EdgeInsets.symmetric(
-                                      horizontal: 16,
-                                      vertical: 12,
-                                    ),
+                                    hintStyle: const TextStyle(fontSize: 14),
+                                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                                   ),
                                 ),
                                 showSearchBox: true,
                                 fit: FlexFit.loose,
                                 constraints: BoxConstraints(
                                   maxHeight: 300,
-                                  maxWidth:
-                                      MediaQuery.of(context).size.width * 0.9,
+                                  maxWidth: MediaQuery.of(context).size.width * 0.9,
                                 ),
-                                itemBuilder:
-                                    (context, item, isDisabled, isSelected) {
-                                      return ListTile(
-                                        title: Text(
-                                          item,
-                                          overflow: TextOverflow.ellipsis,
-                                          maxLines: 1,
-                                          style: TextStyle(fontSize: 14),
-                                        ),
-                                      );
-                                    },
+                                itemBuilder: (context, item, isDisabled, isSelected) =>
+                                    ListTile(title: Text(item, overflow: TextOverflow.ellipsis, maxLines: 1)),
                               ),
-                              items: (filter, infiniteScrollProps) async {
-                                return banks
-                                    .where(
-                                      (bank) =>
-                                          (bank['attributes']['name'] as String)
-                                              .toLowerCase()
-                                              .contains(filter.toLowerCase()),
-                                    )
-                                    .map(
-                                      (bank) =>
-                                          bank['attributes']['name'] as String,
-                                    )
-                                    .toList();
-                              },
+                              items: (filter, _) async => banks
+                                  .where((b) => (b['attributes']['name'] as String)
+                                      .toLowerCase()
+                                      .contains(filter.toLowerCase()))
+                                  .map((b) => b['attributes']['name'] as String)
+                                  .toList(),
                               decoratorProps: DropDownDecoratorProps(
                                 decoration: InputDecoration(
                                   hintText: "Select Bank",
-                                  hintStyle: TextStyle(
-                                    color: Colors.grey.shade600,
-                                  ),
-                                  border: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
+                                  hintStyle: TextStyle(color: Colors.grey.shade600),
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                                 ),
                               ),
                               onChanged: (value) {
                                 setState(() {
-                                  selectedBank = banks.firstWhere(
-                                    (b) => b['attributes']['name'] == value,
-                                  )['id'];
+                                  selectedBank = banks.firstWhere((b) => b['attributes']['name'] == value)['id'];
                                   selectedBankName = value;
-                                  if (accountNumberController.text.length == 10) {
-                                    _sudoNameEnquiry();
-                                  }
+                                  if (accountNumberController.text.length == 10) _safehavenNameEnquiry();
                                 });
                               },
                               selectedItem: selectedBank != null
-                                  ? banks.firstWhere(
-                                      (b) => b['id'] == selectedBank,
-                                      orElse: () =>
-                                          {
-                                                'attributes': {'name': null},
-                                              }
-                                              as Map<String, Object>,
-                                    )['attributes']['name']
+                                  ? banks
+                                      .cast<Map<String, dynamic>?>()
+                                      .firstWhere((b) => b?['id'] == selectedBank, orElse: () => null)
+                                      ?['attributes']?['name'] as String?
                                   : null,
                             ),
-                      SizedBox(height: 16),
+                      const SizedBox(height: 16),
                       if (isFetchingAccountName || accountNameController.text.isNotEmpty) ...[
                         const Text('Account Name'),
                         const SizedBox(height: 8),
@@ -967,21 +836,17 @@ class _BankTransferPageState extends State<BankTransferPage> {
                           enabled: false,
                           decoration: InputDecoration(
                             hintStyle: TextStyle(color: Colors.grey.shade600),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(8),
-                            ),
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                             hintText: 'Account name',
                             suffixIcon: isFetchingAccountName
                                 ? Padding(
-                                    padding: const EdgeInsets.all(12.0),
+                                    padding: const EdgeInsets.all(12),
                                     child: SizedBox(
                                       width: 20,
                                       height: 20,
                                       child: CircularProgressIndicator(
                                         strokeWidth: 2,
-                                        valueColor: AlwaysStoppedAnimation<Color>(
-                                          primaryColor,
-                                        ),
+                                        valueColor: AlwaysStoppedAnimation<Color>(primaryColor),
                                       ),
                                     ),
                                   )
@@ -1000,24 +865,14 @@ class _BankTransferPageState extends State<BankTransferPage> {
                         style: ElevatedButton.styleFrom(
                           backgroundColor: primaryColor,
                           minimumSize: const Size(double.infinity, 50),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                         ),
-                        child: const Text(
-                          'Next',
-                          style: TextStyle(color: Colors.white),
-                        ),
+                        child: const Text('Next', style: TextStyle(color: Colors.white)),
                       ),
-                    ]
-                    // PAGE 1: Amount & Remark
-                    else if (_currentPage == 1) ...[
+                    ] else if (_currentPage == 1) ...[
                       Container(
                         padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: Colors.grey.shade50,
-                          borderRadius: BorderRadius.circular(8),
-                        ),
+                        decoration: BoxDecoration(color: Colors.grey.shade50, borderRadius: BorderRadius.circular(8)),
                         child: Row(
                           children: [
                             CircleAvatar(
@@ -1029,10 +884,7 @@ class _BankTransferPageState extends State<BankTransferPage> {
                                     .take(2)
                                     .map((s) => s[0].toUpperCase())
                                     .join(),
-                                style: TextStyle(
-                                  color: primaryColor,
-                                  fontWeight: FontWeight.bold,
-                                ),
+                                style: TextStyle(color: primaryColor, fontWeight: FontWeight.bold),
                               ),
                             ),
                             const SizedBox(width: 12),
@@ -1040,19 +892,11 @@ class _BankTransferPageState extends State<BankTransferPage> {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
+                                  Text(accountNameController.text,
+                                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
                                   Text(
-                                    accountNameController.text,
-                                    style: const TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      fontSize: 14,
-                                    ),
-                                  ),
-                                  Text(
-                                    '${accountNumberController.text} · ${banks.firstWhere((b) => b['id'] == selectedBank, orElse: () => {'attributes': {'name': 'Unknown'}})['attributes']['name']}',
-                                    style: TextStyle(
-                                      color: Colors.grey.shade600,
-                                      fontSize: 12,
-                                    ),
+                                    '${accountNumberController.text} · ${_getBankName()}',
+                                    style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
                                   ),
                                 ],
                               ),
@@ -1064,55 +908,31 @@ class _BankTransferPageState extends State<BankTransferPage> {
                       const Text('Amount to Send'),
                       const SizedBox(height: 8),
                       Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 14,
-                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(8),
                           border: Border.all(color: Colors.grey.shade400),
                         ),
                         child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
-                            Text(
-                              '₦',
-                              style: TextStyle(
-                                fontSize: 18,
-                                color: Colors.grey.shade700,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
+                            const Text('₦', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                             const SizedBox(width: 8),
                             Expanded(
                               child: TextField(
                                 controller: amountController,
-                                keyboardType:
-                                    const TextInputType.numberWithOptions(
-                                      decimal: true,
-                                    ),
+                                keyboardType: const TextInputType.numberWithOptions(decimal: true),
                                 decoration: const InputDecoration(
-                                  isDense: true,
-                                  border: InputBorder.none,
-                                  enabledBorder: InputBorder.none,
-                                  focusedBorder: InputBorder.none,
-                                  contentPadding: EdgeInsets.zero,
-                                  hintText: '0.00',
-                                ),
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w500,
-                                ),
+  isDense: true,
+  border: InputBorder.none,
+  enabledBorder: InputBorder.none,
+  focusedBorder: InputBorder.none,
+  contentPadding: EdgeInsets.zero,
+  hintText: '0.00',
+),
+                                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
                               ),
                             ),
-                            Text(
-                              feeText,
-                              style: GoogleFonts.inter(
-                                color: primaryColor,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
+                            Text(feeText, style: GoogleFonts.inter(color: primaryColor, fontSize: 11, fontWeight: FontWeight.w600)),
                           ],
                         ),
                       ),
@@ -1130,8 +950,7 @@ class _BankTransferPageState extends State<BankTransferPage> {
                             (m) => '${m[1]},',
                           );
                           return GestureDetector(
-                            onTap: () => setState(() =>
-                                amountController.text = amt.toString()),
+                            onTap: () => setState(() => amountController.text = amt.toString()),
                             child: Container(
                               decoration: BoxDecoration(
                                 color: Colors.grey.shade100,
@@ -1139,13 +958,7 @@ class _BankTransferPageState extends State<BankTransferPage> {
                                 border: Border.all(color: Colors.grey.shade300),
                               ),
                               alignment: Alignment.center,
-                              child: Text(
-                                '₦$fmtAmt',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.w600,
-                                  fontSize: 13,
-                                ),
-                              ),
+                              child: Text('₦$fmtAmt', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
                             ),
                           );
                         }).toList(),
@@ -1157,34 +970,21 @@ class _BankTransferPageState extends State<BankTransferPage> {
                         controller: remarkController,
                         decoration: InputDecoration(
                           hintStyle: TextStyle(color: Colors.grey.shade600),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                           hintText: 'Enter Remark',
                         ),
                       ),
-                      SizedBox(height: 20),
+                      const SizedBox(height: 20),
                       Row(
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(
-                                "Ghost Mode",
-                                style: GoogleFonts.inter(
-                                  color: Colors.black26,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                              SizedBox(height: 5),
-                              Text(
-                                "Send money anonymously",
-                                style: GoogleFonts.inter(
-                                  color: Colors.black54,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
+                              Text("Ghost Mode", style: GoogleFonts.inter(color: Colors.black26)),
+                              const SizedBox(height: 5),
+                              Text("Send money anonymously",
+                                  style: GoogleFonts.inter(color: Colors.black54, fontWeight: FontWeight.w600)),
                             ],
                           ),
                           FlutterSwitch(
@@ -1196,9 +996,7 @@ class _BankTransferPageState extends State<BankTransferPage> {
                             value: sendAnonymously,
                             activeColor: primaryColor,
                             inactiveColor: Colors.grey.shade300,
-                            onToggle: (val) async {
-                              setState(() => sendAnonymously = val);
-                            },
+                            onToggle: (val) => setState(() => sendAnonymously = val),
                           ),
                         ],
                       ),
@@ -1211,131 +1009,162 @@ class _BankTransferPageState extends State<BankTransferPage> {
                                   await _ghostTransfer();
                                 } else {
                                   await _createCounterparty();
-                                  await _sudoTransferNip();
+                                  await _safehavenTransferNip();
                                 }
                               },
                         style: ElevatedButton.styleFrom(
                           backgroundColor: primaryColor,
                           minimumSize: const Size(double.infinity, 50),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                         ),
                         child: isLoading
-                            ? CircularProgressIndicator(color: Colors.white)
-                            : const Text(
-                                'Confirm',
-                                style: TextStyle(color: Colors.white),
-                              ),
+                            ? const CircularProgressIndicator(color: Colors.white)
+                            : const Text('Confirm', style: TextStyle(color: Colors.white)),
                       ),
                     ],
                   ],
                 ),
               ),
-              // Recents section - only on page 0
-              if (_currentPage == 0) ...[
-                if (_loadingRecents)
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 16),
-                    child: Center(child: CircularProgressIndicator()),
-                  )
-                else if (_recentTransfers.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.grey.shade200),
-                      ),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
-                            child: Text(
-                              'Recents',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 15,
-                                color: Colors.black87,
-                              ),
-                            ),
+              if (_currentPage == 0 && _recentTransfers.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.grey.shade200),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Padding(
+                          padding: EdgeInsets.fromLTRB(16, 14, 16, 8),
+                          child: Text('Recents', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                        ),
+                        ListView.separated(
+                          shrinkWrap: true,
+                          physics: const NeverScrollableScrollPhysics(),
+                          itemCount: _recentTransfers.length,
+                          separatorBuilder: (_, __) => Divider(
+                            height: 1,
+                            indent: 16,
+                            endIndent: 16,
+                            color: Colors.grey.shade100,
                           ),
-                          ListView.separated(
-                            shrinkWrap: true,
-                            physics: const NeverScrollableScrollPhysics(),
-                            itemCount: _recentTransfers.length,
-                            separatorBuilder: (_, __) => Divider(
-                              height: 1,
-                              indent: 16,
-                              endIndent: 16,
-                              color: Colors.grey.shade100,
-                            ),
-                            itemBuilder: (context, index) {
-                              final r = _recentTransfers[index];
-                              final name = r['recipientName']?.toString() ?? 'Unknown';
-                              final acct = r['account_number']?.toString() ?? '';
-                              final bank = r['bankName']?.toString() ?? '';
-                              final initials = name
-                                  .split(' ')
-                                  .where((s) => s.isNotEmpty)
-                                  .take(2)
-                                  .map((s) => s[0].toUpperCase())
-                                  .join();
-                              return ListTile(
-                                contentPadding: const EdgeInsets.symmetric(
-                                    horizontal: 16, vertical: 4),
-                                leading: CircleAvatar(
-                                  backgroundColor:
-                                      primaryColor.withValues(alpha: 0.12),
-                                  child: Text(
-                                    initials,
-                                    style: TextStyle(
-                                      color: primaryColor,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 14,
-                                    ),
-                                  ),
-                                ),
-                                title: Text(
-                                  name,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w600,
+                          itemBuilder: (context, index) {
+                            final r = _recentTransfers[index];
+                            final name = r['recipientName']?.toString() ?? 'Unknown';
+                            final acct = r['account_number']?.toString() ?? '';
+                            final bank = r['bankName']?.toString() ?? '';
+                            final alias = _aliases
+                                .where((a) => a.type == 'account' && a.accountNumber == acct)
+                                .firstOrNull;
+                            final initials = name
+                                .split(' ')
+                                .where((s) => s.isNotEmpty)
+                                .take(2)
+                                .map((s) => s[0].toUpperCase())
+                                .join();
+                            return ListTile(
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                              leading: CircleAvatar(
+                                backgroundColor: primaryColor.withValues(alpha: 0.12),
+                                child: Text(
+                                  initials,
+                                  style: GoogleFonts.inter(
+                                    color: primaryColor,
+                                    fontWeight: FontWeight.bold,
                                     fontSize: 14,
                                   ),
                                 ),
-                                subtitle: Text(
-                                  '$acct · $bank',
-                                  style: TextStyle(
-                                    color: Colors.grey.shade600,
-                                    fontSize: 12,
+                              ),
+                              title: Row(
+                                children: [
+                                  Flexible(
+                                    child: Text(
+                                      name,
+                                      style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
                                   ),
-                                ),
-                                onTap: () {
-                                  final bankCode = r['bank_code']?.toString();
-                                  setState(() {
-                                    accountNumberController.text = acct;
-                                    accountNameController.text = name;
-                                    if (bankCode != null &&
-                                        banks.any((b) => b['id'] == bankCode)) {
+                                  if (alias != null) ...[
+                                    const SizedBox(width: 6),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: Colors.orange.withValues(alpha: 0.12),
+                                        borderRadius: BorderRadius.circular(20),
+                                      ),
+                                      child: Text(
+                                        '~${alias.alias}',
+                                        style: const TextStyle(color: Colors.orange, fontSize: 11, fontWeight: FontWeight.w600),
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
+                              subtitle: Text(
+                                '$acct · $bank',
+                                style: GoogleFonts.inter(color: Colors.grey.shade600, fontSize: 12),
+                              ),
+                              onTap: () {
+                                final bankCode = r['bank_code']?.toString();
+                                final bankNameFromRecent = r['bankName']?.toString();
+
+                                setState(() {
+                                  accountNumberController.text = acct;
+                                  accountNameController.text = name;
+
+                                  if (bankCode != null && bankCode.isNotEmpty) {
+                                    final matchedBank = banks
+                                        .cast<Map<String, dynamic>?>()
+                                        .firstWhere((b) => b?['id'] == bankCode, orElse: () => null);
+                                    if (matchedBank != null && matchedBank['id'] != null) {
                                       selectedBank = bankCode;
+                                    } else if (bankNameFromRecent != null && bankNameFromRecent.isNotEmpty) {
+                                      final nameMatched = banks
+                                          .cast<Map<String, dynamic>?>()
+                                          .firstWhere(
+                                            (b) => (b?['attributes']?['name'] as String? ?? '')
+                                                    .toLowerCase() ==
+                                                bankNameFromRecent.toLowerCase(),
+                                            orElse: () => null,
+                                          );
+                                      if (nameMatched != null) {
+                                        selectedBank = nameMatched['id'] as String?;
+                                      }
                                     }
-                                    _currentPage = 1;
-                                  });
-                                },
-                              );
-                            },
-                          ),
-                        ],
-                      ),
+                                  }
+
+                                  _currentPage = 1;
+                                });
+
+                                Future.delayed(const Duration(milliseconds: 100), () {
+                                  if (acct.length == 10 && selectedBank != null && mounted) {
+                                    _safehavenNameEnquiry();
+                                  }
+                                });
+                              },
+                            );
+                          },
+                        ),
+                      ],
                     ),
                   ),
-              ],
+                ),
             ],
           ),
         ),
       ),
     );
+  }
+
+  String _getBankName() {
+    if (selectedBank == null || banks.isEmpty) return 'Unknown Bank';
+    final bank = banks.cast<Map<String, dynamic>?>()
+        .firstWhere((b) => b?['id'] == selectedBank, orElse: () => null);
+    if (bank == null) return 'Unknown Bank';
+    final name = (bank['attributes']?['name'] as String?)?.trim();
+    return (name?.isNotEmpty == true) ? name! : 'Unknown Bank';
   }
 }

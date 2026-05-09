@@ -849,21 +849,34 @@ class _CardsPageState extends State<CardsPage> {
     double amountNGN,
   ) async {
     try {
-      final String? userAccountId = userDetails['accountId'];
-      if (userAccountId == null || userAccountId.isEmpty) {
-        print('Refund skipped: Missing user accountId');
+      final String recipientAccountId = userDetails['accountId']?.toString() ?? '';
+      final String recipientAccountNumber =
+          userDetails['accountNumber']?.toString() ?? '';
+      final String toAccountId = recipientAccountNumber.isNotEmpty
+          ? recipientAccountNumber
+          : recipientAccountId;
+      if (toAccountId.isEmpty) {
+        print('Refund skipped: Missing recipient account details');
         return false;
       }
 
+      final String recipientBankId =
+          userDetails['bankId']?.toString() ?? '090286';
+
       // Refund: company → user (book transfer — both on Sudo)
-      final refundResult = await callCloudFunctionLogged('sudoTransferIntra', source: 'business_app', payload: {
-            'fromAccountId': companyVa['id'],
-            'toAccountId': userAccountId,
-            'amount': (amountNGN * 100).toInt(),
-            'currency': 'NGN',
-            'narration': 'Refund for failed card creation/funding',
-            'idempotencyKey': const Uuid().v4(),
-          });
+      final refundResult = await callCloudFunctionLogged(
+        'sudoTransferIntra',
+        source: 'business_app',
+        payload: {
+          'fromAccountId': companyVa['id'],
+          'toAccountId': toAccountId,
+          'toBankCode': recipientBankId,
+          'amount': (amountNGN * 100).toInt(),
+          'currency': 'NGN',
+          'narration': 'Refund for failed card creation/funding',
+          'idempotencyKey': const Uuid().v4(),
+        },
+      );
 
       if (refundResult.data['data']['attributes']['status'] == 'FAILED') {
         print('Refund transfer failed: ${refundResult.data['message']}');

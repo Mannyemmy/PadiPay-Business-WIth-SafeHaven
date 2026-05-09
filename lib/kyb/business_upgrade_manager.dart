@@ -61,7 +61,12 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
           .get();
 
       final data = doc.exists ? doc.data()! : <String, dynamic>{};
-      if (data['safehavenData']['virtualAccount'] != null) {
+      final Map<String, dynamic>? businessSafehavenData =
+          data['safehavenData'] as Map<String, dynamic>?;
+      final bool hasBusinessSafehavenAccount =
+          businessSafehavenData?['virtualAccount'] != null;
+
+      if (hasBusinessSafehavenAccount) {
         currentKycStatus = "APPROVED";
       } else {
         currentKycStatus =
@@ -115,20 +120,33 @@ class _BusinessUpgradeManagerState extends State<BusinessUpgradeManager> {
           (qoreVerified || tierFromSudo >= 1 || hasCustomerCreation);
 
       final bool effectiveVerified = bvnVerifiedDirect || fallbackWouldFire;
+      final Map<String, dynamic>? userSafehavenData =
+          userData['safehavenData'] as Map<String, dynamic>?;
+      final bool hasUserSafehavenAccount =
+          userSafehavenData?['virtualAccount'] != null;
+      final bool hasSafehavenAccount =
+          hasBusinessSafehavenAccount || hasUserSafehavenAccount;
+      final bool effectiveVerifiedFinal = effectiveVerified || hasSafehavenAccount;
       final bool effectiveFailed = bvnExplicitlyFalse;
 
       // READ TIER FROM safehavenData (primary) or fallback to sudoData
-      final safehavenTier =
-          (userData['safehavenData']?['tier'] as num?)?.toInt() ?? 0;
-      userTier = safehavenTier > 0 ? safehavenTier : tierFromSudo;
+      if (hasBusinessSafehavenAccount) {
+        userTier = 3;
+      } else {
+        final int safehavenTier =
+            (userSafehavenData?['tier'] as num?)?.toInt() ??
+            (businessSafehavenData?['tier'] as num?)?.toInt() ??
+            0;
+        userTier = safehavenTier > 0 ? safehavenTier : tierFromSudo;
+      }
 
       // Set initial flags from Firestore
       bool contactFixedLocal = data['contact_fixed'] ?? false;
       bool businessFixedLocal = data['business_fixed'] ?? false;
       bool repFixedLocal = data['rep_fixed'] ?? false;
       bool docsFixedLocal = data['docs_fixed'] ?? false;
-      bool idVerifiedLocal = effectiveVerified;
-      bool idSubmittedLocal = effectiveVerified;
+      bool idVerifiedLocal = effectiveVerifiedFinal;
+      bool idSubmittedLocal = effectiveVerifiedFinal;
       bool idFailedLocal = effectiveFailed;
 
       // --- TIER-BASED OVERRIDES ---

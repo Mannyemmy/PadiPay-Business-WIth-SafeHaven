@@ -1360,41 +1360,51 @@ Future<String> _getUserNameById(String userId) async {
       }
 
       final accountDetails = await getCurrentAccountIdAndType();
-      final accountId = accountDetails['accountId']?.toString();
-      if (accountId == null) {
+      final senderAccountId = accountDetails['accountId']?.toString() ?? '';
+      final senderAccountNumber = accountDetails['accountNumber']?.toString() ?? '';
+      final fromAccountId = senderAccountId.isNotEmpty
+          ? senderAccountId
+          : senderAccountNumber;
+      if (fromAccountId.isEmpty) {
         showToast('Account details not found', Colors.red);
         return false;
       }
 
-      // Recipient's Sudo account ID is in the WiFi acceptance payload
-      final toAccountId = payload['accountId']?.toString();
+      final recipientAccountNumber = payload['accountNumber']?.toString() ?? '';
+      final toAccountId = recipientAccountNumber.isNotEmpty
+          ? recipientAccountNumber
+          : payload['accountId']?.toString();
       if (toAccountId == null || toAccountId.isEmpty) {
-        showToast('Recipient account ID not found', Colors.red);
+        showToast('Recipient account details not found', Colors.red);
         return false;
       }
 
-      final recipientAccountNumber = payload['accountNumber'];
-      final recipientBankId = payload['bankId']?.toString();
+      final recipientBankId = payload['bankId']?.toString() ?? '090286';
       final recipientBankName = payload['bankName'];
       final recipientAccountName = payload['accountName'];
 
-      final ownAccountNumber = accountDetails['accountNumber']?.toString();
-      if (ownAccountNumber != null && ownAccountNumber == recipientAccountNumber) {
+      final ownAccountNumber = senderAccountNumber;
+      if (ownAccountNumber.isNotEmpty && ownAccountNumber == recipientAccountNumber) {
         showToast('You cannot send money to your own account', Colors.red);
         return false;
       }
 
       // Book transfer (both parties on Sudo — no counterparty needed)
-      final amountKobo = (amount * 100).toInt();
-      debugPrint('sudoTransferIntra: from=$accountId to=$toAccountId amount=$amountKobo');
-      final transferResult = await callCloudFunctionLogged('sudoTransferIntra', source: 'business_app', payload: {
-        'fromAccountId': accountId,
-        'toAccountId': toAccountId,
-        'amount': amountKobo,
-        'currency': 'NGN',
-        'narration': purpose,
-        'idempotencyKey': const Uuid().v4(),
-      });
+      final amountKobo = (amount * 100).round();
+      debugPrint('sudoTransferIntra: from=$fromAccountId to=$toAccountId amount=$amountKobo bank=$recipientBankId');
+      final transferResult = await callCloudFunctionLogged(
+        'sudoTransferIntra',
+        source: 'business_app',
+        payload: {
+          'fromAccountId': fromAccountId,
+          'toAccountId': toAccountId,
+          'toBankCode': recipientBankId,
+          'amount': amountKobo,
+          'currency': 'NGN',
+          'narration': purpose.trim().isEmpty ? 'WiFi payment' : purpose.trim(),
+          'idempotencyKey': const Uuid().v4(),
+        },
+      );
 
       final status = transferResult.data['data']['attributes']['status'];
       final failureReason = transferResult.data['data']['attributes']['failureReason'];

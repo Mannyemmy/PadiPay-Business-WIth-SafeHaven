@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -44,7 +46,10 @@ class _ProfilePageState extends State<ProfilePage> {
   bool isBusinessUser = false;
   bool isSuperAgent = false;
   bool isLoggedInStandUser = false;
+  bool _bvnMatch = false;
+
   bool _detectionCompleteProfile = false;
+  StreamSubscription<DocumentSnapshot>? _userDocSub;
 
   @override
   void initState() {
@@ -84,7 +89,10 @@ class _ProfilePageState extends State<ProfilePage> {
 
     // Check if this auth user is a stand user and, if so, fetch parent business tier
     try {
-      DocumentSnapshot standSnap = await FirebaseFirestore.instance.collection('standUsers').doc(user.uid).get();
+      DocumentSnapshot standSnap = await FirebaseFirestore.instance
+          .collection('standUsers')
+          .doc(user.uid)
+          .get();
       if (standSnap.exists) {
         final sdata = standSnap.data() as Map<String, dynamic>?;
         final parentBusinessId = sdata?['parentBusinessId'] as String?;
@@ -93,7 +101,10 @@ class _ProfilePageState extends State<ProfilePage> {
           String? parentTier;
           try {
             // fetch parent user document to get tier (stand users should inherit tier from parent USER)
-            final parentUserSnap = await FirebaseFirestore.instance.collection('users').doc(parentBusinessId).get();
+            final parentUserSnap = await FirebaseFirestore.instance
+                .collection('users')
+                .doc(parentBusinessId)
+                .get();
             if (parentUserSnap.exists) {
               final pdata = parentUserSnap.data() as Map<String, dynamic>;
               parentTier = getWalletTier(pdata);
@@ -118,12 +129,41 @@ class _ProfilePageState extends State<ProfilePage> {
       }
     }
 
-    DocumentSnapshot businessSnap = await FirebaseFirestore.instance.collection('businesses').doc(user.uid).get();
+    DocumentSnapshot businessSnap = await FirebaseFirestore.instance
+        .collection('businesses')
+        .doc(user.uid)
+        .get();
     final businessData = businessSnap.data() as Map<String, dynamic>?;
     setState(() {
       isBusinessUser = businessSnap.exists;
       isSuperAgent = isMockSuperAgent || businessData?['isSuperAgent'] == true;
     });
+  }
+
+  void _listenForBvnMatch() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    _userDocSub?.cancel();
+    _userDocSub = FirebaseFirestore.instance
+        .collection('users')
+        .doc(user.uid)
+        .snapshots()
+        .listen(
+          (snapshot) {
+            final data = snapshot.data() ?? <String, dynamic>{};
+            final qore = data['qoreIdData'] as Map<String, dynamic>?;
+            final verification = qore?['verification'] as Map<String, dynamic>?;
+            final metadata = verification?['metadata'] as Map<String, dynamic>?;
+            final match = metadata?['match'];
+            if (!mounted) return;
+            setState(() {
+              _bvnMatch = match == true;
+            });
+          },
+          onError: (e) {
+            print('BVN match listener error: $e');
+          },
+        );
   }
 
   @override
@@ -146,8 +186,8 @@ class _ProfilePageState extends State<ProfilePage> {
                       radius: 60,
                       backgroundImage:
                           profilePhotoUrl != null && profilePhotoUrl!.isNotEmpty
-                              ? NetworkImage(profilePhotoUrl!)
-                              : const AssetImage("assets/profile_placeholder.png"),
+                          ? NetworkImage(profilePhotoUrl!)
+                          : const AssetImage("assets/profile_placeholder.png"),
                     ),
                     SizedBox(height: 10),
                     Text(
@@ -176,17 +216,29 @@ class _ProfilePageState extends State<ProfilePage> {
                         ),
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(20),
-                          color: Colors.green.withValues(alpha: 0.2),
+                          color: tier == "0"
+                              ? Colors.grey.withValues(alpha: 0.2)
+                              : Colors.green.withValues(alpha: 0.2),
                         ),
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Icon(Icons.task_alt, color: Colors.green),
+                            Icon(
+                              Icons.task_alt,
+                              color: tier == "0" ? Colors.grey : Colors.green,
+                            ),
                             const SizedBox(width: 6),
                             Text(
-                              "KYC Verified Tier $tier",
-                              style: const TextStyle(
-                                color: Colors.green,
+                              // only append a tier number if there's an actual
+                              // banking tier assigned; BVN match alone is not a
+                              // real tier.
+                              _bvnMatch && tier == "0"
+                                  ? "Identity Verified"
+                                  : tier == "0"
+                                  ? "KYC Not Verified"
+                                  : "KYC Verified Tier $tier",
+                              style: TextStyle(
+                                color: tier == "0" ? Colors.grey : Colors.green,
                                 fontWeight: FontWeight.bold,
                               ),
                             ),
@@ -201,226 +253,11 @@ class _ProfilePageState extends State<ProfilePage> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           const SizedBox(height: 20),
-                          Builder(builder: (context) {
-                            final actionsEnabled = _detectionCompleteProfile ? !isLoggedInStandUser : false;
-                            return ListTile(
-                              title: Opacity(
-                                opacity: actionsEnabled ? 1.0 : 0.5,
-                                child: Container(
-                                  padding: EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 8,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(color: Colors.grey.shade300),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Container(
-                                        padding: EdgeInsets.all(10),
-                                        decoration: BoxDecoration(
-                                          color: Colors.grey.shade100,
-                                          shape: BoxShape.circle,
-                                        ),
-                                        child: SvgPicture.asset(
-                                          'assets/profile.svg',
-                                          width: 20,
-                                          height: 20,
-                                        ),
-                                      ),
-                                      SizedBox(width: 20),
-                                      Text(
-                                        'Edit Profile',
-                                        style: TextStyle(
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.w700,
-                                          color: Colors.grey.shade700,
-                                        ),
-                                      ),
-                                      Spacer(),
-                                      Icon(
-                                        Icons.arrow_forward_ios,
-                                        size: 15,
-                                        color: Colors.grey.shade600,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              onTap: actionsEnabled ? () {
-                                navigateTo(context, EditProfilePage());
-                              } : null,
-                            );
-                          }),
-                          Builder(builder: (context) {
-                            final actionsEnabled = _detectionCompleteProfile ? !isLoggedInStandUser : false;
-                            return ListTile(
-                              title: Opacity(
-                                opacity: actionsEnabled ? 1.0 : 0.5,
-                                child: Container(
-                                  padding: EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 8,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(color: Colors.grey.shade300),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Container(
-                                        padding: EdgeInsets.all(10),
-                                        decoration: BoxDecoration(
-                                          color: Colors.grey.shade100,
-                                          shape: BoxShape.circle,
-                                        ),
-                                        child: SvgPicture.asset(
-                                          'assets/proicons_gift.svg',
-                                          width: 20,
-                                          height: 20,
-                                        ),
-                                      ),
-                                      SizedBox(width: 20),
-                                      Text(
-                                        'Upgrade Account',
-                                        style: TextStyle(
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.w700,
-                                          color: Colors.grey.shade700,
-                                        ),
-                                      ),
-                                      Spacer(),
-                                      Icon(
-                                        Icons.arrow_forward_ios,
-                                        size: 15,
-                                        color: Colors.grey.shade600,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              onTap: actionsEnabled
-                                  ? () {
-                                      if (isBusinessUser) {
-                                        navigateTo(context, BusinessUpgradeManager());
-                                      } else {
-                                        if(int.parse(tier??"0")>=2){
-                                          return;
-                                        }
-                                        navigateTo(context, UserUpgradeManager(tier: tier ?? "0"));
-                                      }
-                                    }
-                                  : null,
-                            );
-                          }),
-                          Builder(builder: (context) {
-                            final actionsEnabled = _detectionCompleteProfile ? !isLoggedInStandUser : false;
-                            return ListTile(
-                              title: Opacity(
-                                opacity: actionsEnabled ? 1.0 : 0.5,
-                                child: Container(
-                                  padding: EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 8,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(color: Colors.grey.shade300),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Container(
-                                        padding: EdgeInsets.all(10),
-                                        decoration: BoxDecoration(
-                                          color: Colors.grey.shade100,
-                                          shape: BoxShape.circle,
-                                        ),
-                                        child: SvgPicture.asset(
-                                          'assets/proicons_gift.svg',
-                                          width: 20,
-                                          height: 20,
-                                        ),
-                                      ),
-                                      SizedBox(width: 20),
-                                      Text(
-                                        'Promos & Offers',
-                                        style: TextStyle(
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.w700,
-                                          color: Colors.grey.shade700,
-                                        ),
-                                      ),
-                                      Spacer(),
-                                      Icon(
-                                        Icons.arrow_forward_ios,
-                                        size: 15,
-                                        color: Colors.grey.shade600,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              onTap: actionsEnabled ? () {
-                                navigateTo(context, PromosScreen());
-                              } : null,
-                            );
-                          }),
-                          Builder(builder: (context) {
-                            final actionsEnabled = _detectionCompleteProfile ? !isLoggedInStandUser : false;
-                            return ListTile(
-                              title: Opacity(
-                                opacity: actionsEnabled ? 1.0 : 0.5,
-                                child: Container(
-                                  padding: EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 8,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(color: Colors.grey.shade300),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Container(
-                                        padding: EdgeInsets.all(10),
-                                        decoration: BoxDecoration(
-                                          color: Colors.grey.shade100,
-                                          shape: BoxShape.circle,
-                                        ),
-                                        child: SvgPicture.asset(
-                                          'assets/formkit_people.svg',
-                                          width: 20,
-                                          height: 20,
-                                        ),
-                                      ),
-                                      SizedBox(width: 20),
-                                      Text(
-                                        'Referrals',
-                                        style: TextStyle(
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.w700,
-                                          color: Colors.grey.shade700,
-                                        ),
-                                      ),
-                                      Spacer(),
-                                      Icon(
-                                        Icons.arrow_forward_ios,
-                                        size: 15,
-                                        color: Colors.grey.shade600,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              onTap: actionsEnabled ? () {
-                                navigateTo(context, ReferralsScreen());
-                              } : null,
-                            );
-                          }),
-                          if (isSuperAgent)
-                            Builder(builder: (context) {
-                              final actionsEnabled = _detectionCompleteProfile ? !isLoggedInStandUser : false;
+                          Builder(
+                            builder: (context) {
+                              final actionsEnabled = _detectionCompleteProfile
+                                  ? !isLoggedInStandUser
+                                  : false;
                               return ListTile(
                                 title: Opacity(
                                   opacity: actionsEnabled ? 1.0 : 0.5,
@@ -431,7 +268,9 @@ class _ProfilePageState extends State<ProfilePage> {
                                     ),
                                     decoration: BoxDecoration(
                                       borderRadius: BorderRadius.circular(10),
-                                      border: Border.all(color: Colors.grey.shade300),
+                                      border: Border.all(
+                                        color: Colors.grey.shade300,
+                                      ),
                                     ),
                                     child: Row(
                                       children: [
@@ -441,15 +280,15 @@ class _ProfilePageState extends State<ProfilePage> {
                                             color: Colors.grey.shade100,
                                             shape: BoxShape.circle,
                                           ),
-                                          child: Icon(
-                                            Icons.workspace_premium_outlined,
-                                            size: 20,
-                                            color: Colors.grey.shade700,
+                                          child: SvgPicture.asset(
+                                            'assets/profile.svg',
+                                            width: 20,
+                                            height: 20,
                                           ),
                                         ),
                                         SizedBox(width: 20),
                                         Text(
-                                          'Super Agent Hub',
+                                          'Edit Profile',
                                           style: TextStyle(
                                             fontSize: 15,
                                             fontWeight: FontWeight.w700,
@@ -468,279 +307,583 @@ class _ProfilePageState extends State<ProfilePage> {
                                 ),
                                 onTap: actionsEnabled
                                     ? () {
-                                        navigateTo(context, const SuperAgentHubPage());
+                                        navigateTo(context, EditProfilePage());
                                       }
                                     : null,
                               );
-                            }),
-                          Builder(builder: (context) {
-                            final actionsEnabled = _detectionCompleteProfile ? !isLoggedInStandUser : false;
-                            return ListTile(
-                              title: Opacity(
-                                opacity: actionsEnabled ? 1.0 : 0.5,
-                                child: Container(
-                                  padding: EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 8,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(color: Colors.grey.shade300),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Container(
-                                        padding: EdgeInsets.all(10),
-                                        decoration: BoxDecoration(
-                                          color: Colors.grey.shade100,
-                                          shape: BoxShape.circle,
-                                        ),
-                                        child: SvgPicture.asset(
-                                          'assets/hugeicons_notification-square.svg',
-                                          width: 20,
-                                          height: 20,
-                                        ),
+                            },
+                          ),
+                          Builder(
+                            builder: (context) {
+                              final actionsEnabled = _detectionCompleteProfile
+                                  ? !isLoggedInStandUser
+                                  : false;
+                              return ListTile(
+                                title: Opacity(
+                                  opacity: actionsEnabled ? 1.0 : 0.5,
+                                  child: Container(
+                                    padding: EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 8,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(
+                                        color: Colors.grey.shade300,
                                       ),
-                                      SizedBox(width: 20),
-                                      Text(
-                                        'Notification Settings',
-                                        style: TextStyle(
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.w700,
-                                          color: Colors.grey.shade700,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Container(
+                                          padding: EdgeInsets.all(10),
+                                          decoration: BoxDecoration(
+                                            color: Colors.grey.shade100,
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: SvgPicture.asset(
+                                            'assets/proicons_gift.svg',
+                                            width: 20,
+                                            height: 20,
+                                          ),
                                         ),
-                                      ),
-                                      Spacer(),
-                                      Icon(
-                                        Icons.arrow_forward_ios,
-                                        size: 15,
-                                        color: Colors.grey.shade600,
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              onTap: actionsEnabled ? () {
-                                navigateTo(context, NotificationSettings());
-                              } : null,
-                            );
-                          }),
-                          Builder(builder: (context) {
-                            final actionsEnabled = _detectionCompleteProfile ? !isLoggedInStandUser : false;
-                            return ListTile(
-                              title: Opacity(
-                                opacity: actionsEnabled ? 1.0 : 0.5,
-                                child: Container(
-                                  padding: EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 8,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(color: Colors.grey.shade300),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Container(
-                                        padding: EdgeInsets.all(10),
-                                        decoration: BoxDecoration(
-                                          color: Colors.grey.shade100,
-                                          shape: BoxShape.circle,
+                                        SizedBox(width: 20),
+                                        Text(
+                                          'Upgrade Account',
+                                          style: TextStyle(
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w700,
+                                            color: Colors.grey.shade700,
+                                          ),
                                         ),
-                                        child: SvgPicture.asset(
-                                          'assets/solar_lock-password-broken.svg',
-                                          width: 20,
-                                          height: 20,
+                                        Spacer(),
+                                        Icon(
+                                          Icons.arrow_forward_ios,
+                                          size: 15,
+                                          color: Colors.grey.shade600,
                                         ),
-                                      ),
-                                      SizedBox(width: 20),
-                                      Text(
-                                        'Change Passcode',
-                                        style: TextStyle(
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.w700,
-                                          color: Colors.grey.shade700,
-                                        ),
-                                      ),
-                                      Spacer(),
-                                      Icon(
-                                        Icons.arrow_forward_ios,
-                                        size: 15,
-                                        color: Colors.grey.shade600,
-                                      ),
-                                    ],
+                                      ],
+                                    ),
                                   ),
                                 ),
-                              ),
-                              onTap: actionsEnabled ? () {
-                                navigateTo(context, EditProfilePage());
-                              } : null,
-                            );
-                          }),
-                          Builder(builder: (context) {
-                            final actionsEnabled = _detectionCompleteProfile ? !isLoggedInStandUser : false;
-                            return ListTile(
-                              title: Opacity(
-                                opacity: actionsEnabled ? 1.0 : 0.5,
-                                child: Container(
-                                  padding: EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 8,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(color: Colors.grey.shade300),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Container(
-                                        padding: EdgeInsets.all(10),
-                                        decoration: BoxDecoration(
-                                          color: Colors.grey.shade100,
-                                          shape: BoxShape.circle,
-                                        ),
-                                        child: SvgPicture.asset(
-                                          'assets/solar_login-outline.svg',
-                                          width: 20,
-                                          height: 20,
-                                        ),
+                                onTap: actionsEnabled
+                                    ? () {
+                                        if (isBusinessUser) {
+                                          navigateTo(
+                                            context,
+                                            BusinessUpgradeManager(),
+                                          );
+                                        } else {
+                                          if (int.parse(tier ?? "0") >= 2) {
+                                            return;
+                                          }
+                                          navigateTo(
+                                            context,
+                                            UserUpgradeManager(
+                                              tier: tier ?? "0",
+                                            ),
+                                          );
+                                        }
+                                      }
+                                    : null,
+                              );
+                            },
+                          ),
+                          Builder(
+                            builder: (context) {
+                              final actionsEnabled = _detectionCompleteProfile
+                                  ? !isLoggedInStandUser
+                                  : false;
+                              return ListTile(
+                                title: Opacity(
+                                  opacity: actionsEnabled ? 1.0 : 0.5,
+                                  child: Container(
+                                    padding: EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 8,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(
+                                        color: Colors.grey.shade300,
                                       ),
-                                      SizedBox(width: 20),
-                                      Text(
-                                        'Login with Touch ID/Face ID',
-                                        style: TextStyle(
-                                          fontSize: 13,
-                                          fontWeight: FontWeight.w700,
-                                          color: Colors.grey.shade700,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Container(
+                                          padding: EdgeInsets.all(10),
+                                          decoration: BoxDecoration(
+                                            color: Colors.grey.shade100,
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: SvgPicture.asset(
+                                            'assets/proicons_gift.svg',
+                                            width: 20,
+                                            height: 20,
+                                          ),
                                         ),
-                                      ),
-                                      Spacer(),
-                                      IgnorePointer(
-                                        ignoring: !actionsEnabled,
-                                        child: FlutterSwitch(
-                                          width: 50,
-                                          height: 25,
-                                          toggleSize: 20,
-                                          borderRadius: 20,
-                                          padding: 3,
-                                          value: isTouchOrFace,
-                                          activeColor: primaryColor,
-                                          inactiveColor: Colors.grey.shade300,
-                                          onToggle: (val) => setState(() => isTouchOrFace = val),
+                                        SizedBox(width: 20),
+                                        Text(
+                                          'Promos & Offers',
+                                          style: TextStyle(
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w700,
+                                            color: Colors.grey.shade700,
+                                          ),
                                         ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              onTap: actionsEnabled ? () {
-                                navigateTo(context, EditProfilePage());
-                              } : null,
-                            );
-                          }),
-                          Builder(builder: (context) {
-                            final actionsEnabled = _detectionCompleteProfile ? !isLoggedInStandUser : false;
-                            return ListTile(
-                              title: Opacity(
-                                opacity: actionsEnabled ? 1.0 : 0.5,
-                                child: Container(
-                                  padding: EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: 8,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(color: Colors.grey.shade300),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Container(
-                                        padding: EdgeInsets.all(10),
-                                        decoration: BoxDecoration(
-                                          color: Colors.grey.shade100,
-                                          shape: BoxShape.circle,
+                                        Spacer(),
+                                        Icon(
+                                          Icons.arrow_forward_ios,
+                                          size: 15,
+                                          color: Colors.grey.shade600,
                                         ),
-                                        child: SvgPicture.asset(
-                                          'assets/octicon_law-24.svg',
-                                          width: 20,
-                                          height: 20,
-                                        ),
-                                      ),
-                                      SizedBox(width: 20),
-                                      Text(
-                                        'Legal',
-                                        style: TextStyle(
-                                          fontSize: 15,
-                                          fontWeight: FontWeight.w700,
-                                          color: Colors.grey.shade700,
-                                        ),
-                                      ),
-                                      Spacer(),
-                                      Icon(
-                                        Icons.arrow_forward_ios,
-                                        size: 15,
-                                        color: Colors.grey.shade600,
-                                      ),
-                                    ],
+                                      ],
+                                    ),
                                   ),
                                 ),
-                              ),
-                              onTap: actionsEnabled ? () {
-                                navigateTo(context, LegalAndRegulatory());
-                              } : null,
-                            );
-                          }),
-                          Builder(builder: (context) {
-                            return ListTile(
-                              title: Container(
-                                padding: EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 8,
+                                onTap: actionsEnabled
+                                    ? () {
+                                        navigateTo(context, PromosScreen());
+                                      }
+                                    : null,
+                              );
+                            },
+                          ),
+                          Builder(
+                            builder: (context) {
+                              final actionsEnabled = _detectionCompleteProfile
+                                  ? !isLoggedInStandUser
+                                  : false;
+                              return ListTile(
+                                title: Opacity(
+                                  opacity: actionsEnabled ? 1.0 : 0.5,
+                                  child: Container(
+                                    padding: EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 8,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(
+                                        color: Colors.grey.shade300,
+                                      ),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Container(
+                                          padding: EdgeInsets.all(10),
+                                          decoration: BoxDecoration(
+                                            color: Colors.grey.shade100,
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: SvgPicture.asset(
+                                            'assets/formkit_people.svg',
+                                            width: 20,
+                                            height: 20,
+                                          ),
+                                        ),
+                                        SizedBox(width: 20),
+                                        Text(
+                                          'Referrals',
+                                          style: TextStyle(
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w700,
+                                            color: Colors.grey.shade700,
+                                          ),
+                                        ),
+                                        Spacer(),
+                                        Icon(
+                                          Icons.arrow_forward_ios,
+                                          size: 15,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
                                 ),
-                                decoration: BoxDecoration(
-                                  borderRadius: BorderRadius.circular(10),
-                                  border: Border.all(color: Colors.grey.shade300),
-                                ),
-                                child: Row(
-                                  children: [
-                                    Container(
-                                      padding: EdgeInsets.all(10),
+                                onTap: actionsEnabled
+                                    ? () {
+                                        navigateTo(context, ReferralsScreen());
+                                      }
+                                    : null,
+                              );
+                            },
+                          ),
+                          if (isSuperAgent)
+                            Builder(
+                              builder: (context) {
+                                final actionsEnabled = _detectionCompleteProfile
+                                    ? !isLoggedInStandUser
+                                    : false;
+                                return ListTile(
+                                  title: Opacity(
+                                    opacity: actionsEnabled ? 1.0 : 0.5,
+                                    child: Container(
+                                      padding: EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 8,
+                                      ),
                                       decoration: BoxDecoration(
-                                        color: Colors.grey.shade100,
-                                        shape: BoxShape.circle,
+                                        borderRadius: BorderRadius.circular(10),
+                                        border: Border.all(
+                                          color: Colors.grey.shade300,
+                                        ),
                                       ),
-                                      child: SvgPicture.asset(
-                                        'assets/dashicons_admin-site-alt3.svg',
-                                        width: 20,
-                                        height: 20,
+                                      child: Row(
+                                        children: [
+                                          Container(
+                                            padding: EdgeInsets.all(10),
+                                            decoration: BoxDecoration(
+                                              color: Colors.grey.shade100,
+                                              shape: BoxShape.circle,
+                                            ),
+                                            child: Icon(
+                                              Icons.workspace_premium_outlined,
+                                              size: 20,
+                                              color: Colors.grey.shade700,
+                                            ),
+                                          ),
+                                          SizedBox(width: 20),
+                                          Text(
+                                            'Super Agent Hub',
+                                            style: TextStyle(
+                                              fontSize: 15,
+                                              fontWeight: FontWeight.w700,
+                                              color: Colors.grey.shade700,
+                                            ),
+                                          ),
+                                          Spacer(),
+                                          Icon(
+                                            Icons.arrow_forward_ios,
+                                            size: 15,
+                                            color: Colors.grey.shade600,
+                                          ),
+                                        ],
                                       ),
                                     ),
-                                    SizedBox(width: 20),
-                                    Text(
-                                      'Visit Our Website',
-                                      style: TextStyle(
-                                        fontSize: 15,
-                                        fontWeight: FontWeight.w700,
-                                        color: Colors.grey.shade700,
-                                      ),
-                                    ),
-                                    Spacer(),
-                                    Icon(
-                                      Icons.arrow_forward_ios,
-                                      size: 15,
-                                      color: Colors.grey.shade600,
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              onTap: () {
-                                launchUrl(
-                                  Uri.parse('https://padipay.co'),
-                                  mode: LaunchMode.externalApplication,
+                                  ),
+                                  onTap: actionsEnabled
+                                      ? () {
+                                          navigateTo(
+                                            context,
+                                            const SuperAgentHubPage(),
+                                          );
+                                        }
+                                      : null,
                                 );
                               },
-                            );
-                          }),
+                            ),
+                          Builder(
+                            builder: (context) {
+                              final actionsEnabled = _detectionCompleteProfile
+                                  ? !isLoggedInStandUser
+                                  : false;
+                              return ListTile(
+                                title: Opacity(
+                                  opacity: actionsEnabled ? 1.0 : 0.5,
+                                  child: Container(
+                                    padding: EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 8,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(
+                                        color: Colors.grey.shade300,
+                                      ),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Container(
+                                          padding: EdgeInsets.all(10),
+                                          decoration: BoxDecoration(
+                                            color: Colors.grey.shade100,
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: SvgPicture.asset(
+                                            'assets/hugeicons_notification-square.svg',
+                                            width: 20,
+                                            height: 20,
+                                          ),
+                                        ),
+                                        SizedBox(width: 20),
+                                        Text(
+                                          'Notification Settings',
+                                          style: TextStyle(
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w700,
+                                            color: Colors.grey.shade700,
+                                          ),
+                                        ),
+                                        Spacer(),
+                                        Icon(
+                                          Icons.arrow_forward_ios,
+                                          size: 15,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                onTap: actionsEnabled
+                                    ? () {
+                                        navigateTo(
+                                          context,
+                                          NotificationSettings(),
+                                        );
+                                      }
+                                    : null,
+                              );
+                            },
+                          ),
+                          Builder(
+                            builder: (context) {
+                              final actionsEnabled = _detectionCompleteProfile
+                                  ? !isLoggedInStandUser
+                                  : false;
+                              return ListTile(
+                                title: Opacity(
+                                  opacity: actionsEnabled ? 1.0 : 0.5,
+                                  child: Container(
+                                    padding: EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 8,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(
+                                        color: Colors.grey.shade300,
+                                      ),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Container(
+                                          padding: EdgeInsets.all(10),
+                                          decoration: BoxDecoration(
+                                            color: Colors.grey.shade100,
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: SvgPicture.asset(
+                                            'assets/solar_lock-password-broken.svg',
+                                            width: 20,
+                                            height: 20,
+                                          ),
+                                        ),
+                                        SizedBox(width: 20),
+                                        Text(
+                                          'Change Passcode',
+                                          style: TextStyle(
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w700,
+                                            color: Colors.grey.shade700,
+                                          ),
+                                        ),
+                                        Spacer(),
+                                        Icon(
+                                          Icons.arrow_forward_ios,
+                                          size: 15,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                onTap: actionsEnabled
+                                    ? () {
+                                        navigateTo(context, EditProfilePage());
+                                      }
+                                    : null,
+                              );
+                            },
+                          ),
+                          Builder(
+                            builder: (context) {
+                              final actionsEnabled = _detectionCompleteProfile
+                                  ? !isLoggedInStandUser
+                                  : false;
+                              return ListTile(
+                                title: Opacity(
+                                  opacity: actionsEnabled ? 1.0 : 0.5,
+                                  child: Container(
+                                    padding: EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 8,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(
+                                        color: Colors.grey.shade300,
+                                      ),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Container(
+                                          padding: EdgeInsets.all(10),
+                                          decoration: BoxDecoration(
+                                            color: Colors.grey.shade100,
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: SvgPicture.asset(
+                                            'assets/solar_login-outline.svg',
+                                            width: 20,
+                                            height: 20,
+                                          ),
+                                        ),
+                                        SizedBox(width: 20),
+                                        Text(
+                                          'Login with Touch ID/Face ID',
+                                          style: TextStyle(
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w700,
+                                            color: Colors.grey.shade700,
+                                          ),
+                                        ),
+                                        Spacer(),
+                                        IgnorePointer(
+                                          ignoring: !actionsEnabled,
+                                          child: FlutterSwitch(
+                                            width: 50,
+                                            height: 25,
+                                            toggleSize: 20,
+                                            borderRadius: 20,
+                                            padding: 3,
+                                            value: isTouchOrFace,
+                                            activeColor: primaryColor,
+                                            inactiveColor: Colors.grey.shade300,
+                                            onToggle: (val) => setState(
+                                              () => isTouchOrFace = val,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                onTap: actionsEnabled
+                                    ? () {
+                                        navigateTo(context, EditProfilePage());
+                                      }
+                                    : null,
+                              );
+                            },
+                          ),
+                          Builder(
+                            builder: (context) {
+                              final actionsEnabled = _detectionCompleteProfile
+                                  ? !isLoggedInStandUser
+                                  : false;
+                              return ListTile(
+                                title: Opacity(
+                                  opacity: actionsEnabled ? 1.0 : 0.5,
+                                  child: Container(
+                                    padding: EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 8,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(10),
+                                      border: Border.all(
+                                        color: Colors.grey.shade300,
+                                      ),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Container(
+                                          padding: EdgeInsets.all(10),
+                                          decoration: BoxDecoration(
+                                            color: Colors.grey.shade100,
+                                            shape: BoxShape.circle,
+                                          ),
+                                          child: SvgPicture.asset(
+                                            'assets/octicon_law-24.svg',
+                                            width: 20,
+                                            height: 20,
+                                          ),
+                                        ),
+                                        SizedBox(width: 20),
+                                        Text(
+                                          'Legal',
+                                          style: TextStyle(
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w700,
+                                            color: Colors.grey.shade700,
+                                          ),
+                                        ),
+                                        Spacer(),
+                                        Icon(
+                                          Icons.arrow_forward_ios,
+                                          size: 15,
+                                          color: Colors.grey.shade600,
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                onTap: actionsEnabled
+                                    ? () {
+                                        navigateTo(
+                                          context,
+                                          LegalAndRegulatory(),
+                                        );
+                                      }
+                                    : null,
+                              );
+                            },
+                          ),
+                          Builder(
+                            builder: (context) {
+                              return ListTile(
+                                title: Container(
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 8,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(
+                                      color: Colors.grey.shade300,
+                                    ),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Container(
+                                        padding: EdgeInsets.all(10),
+                                        decoration: BoxDecoration(
+                                          color: Colors.grey.shade100,
+                                          shape: BoxShape.circle,
+                                        ),
+                                        child: SvgPicture.asset(
+                                          'assets/dashicons_admin-site-alt3.svg',
+                                          width: 20,
+                                          height: 20,
+                                        ),
+                                      ),
+                                      SizedBox(width: 20),
+                                      Text(
+                                        'Visit Our Website',
+                                        style: TextStyle(
+                                          fontSize: 15,
+                                          fontWeight: FontWeight.w700,
+                                          color: Colors.grey.shade700,
+                                        ),
+                                      ),
+                                      Spacer(),
+                                      Icon(
+                                        Icons.arrow_forward_ios,
+                                        size: 15,
+                                        color: Colors.grey.shade600,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                onTap: () {
+                                  launchUrl(
+                                    Uri.parse('https://padipay.co'),
+                                    mode: LaunchMode.externalApplication,
+                                  );
+                                },
+                              );
+                            },
+                          ),
                           ListTile(
                             title: Container(
                               padding: EdgeInsets.symmetric(
@@ -805,19 +948,39 @@ class _ProfilePageState extends State<ProfilePage> {
                     currentIndex: _selectedIndex,
                     onTap: (index) {
                       if (index == 0) {
-                        navigateTo(context, HomePage(), type: NavigationType.push);
+                        navigateTo(
+                          context,
+                          HomePage(),
+                          type: NavigationType.push,
+                        );
                       }
                       if (index == 1) {
-                        navigateTo(context, CardsPage(), type: NavigationType.push);
+                        navigateTo(
+                          context,
+                          CardsPage(),
+                          type: NavigationType.push,
+                        );
                       }
                       if (index == 2) {
-                        navigateTo(context, MyBusiness(), type: NavigationType.push);
-                      } 
+                        navigateTo(
+                          context,
+                          MyBusiness(),
+                          type: NavigationType.push,
+                        );
+                      }
                       if (index == 3) {
-                        navigateTo(context, TransactionsHistory(), type: NavigationType.push);
+                        navigateTo(
+                          context,
+                          TransactionsHistory(),
+                          type: NavigationType.push,
+                        );
                       }
                       if (index == 5) {
-                        navigateTo(context, const PadiBookPage(), type: NavigationType.push);
+                        navigateTo(
+                          context,
+                          const PadiBookPage(),
+                          type: NavigationType.push,
+                        );
                       } else {
                         setState(() => _selectedIndex = index);
                       }

@@ -46,12 +46,14 @@ class _HomePageState extends State<HomePage> {
   int _currentBusinessIndex = 0;
   String userName = "";
   bool isBusinessAccount = true;
+  bool _balanceLoaded = false;
   String? userTag = "";
   final bool _isLoadingBalance = false;
   bool showAwaitingDocsBanner = false;
   bool showCreateBusinessBankAccountBanner = false;
   bool showStorefrontActivationBanner = false;
   bool businessProfileExists = false;
+  bool kybVerificationSubmitted = false;
   bool isLoadingCreateAccount = false;
   bool storefrontEnabled = false;
   bool isActivatingStorefront = false;
@@ -59,6 +61,13 @@ class _HomePageState extends State<HomePage> {
   bool isStandMode = false;
   bool isLoggedInStandUser = false;
   bool isSuperAgentUser = false;
+  bool _isLoadingTransactions = true;
+  bool _headerLoaded = false;
+
+  // Recent transactions
+  List<DocumentSnapshot> _recentTxSentDocs = [];
+  List<DocumentSnapshot> _recentTxReceivedDocs = [];
+  List<DocumentSnapshot> _recentCardTxDocs = [];
   int superAgentStars = 0;
   double superAgentCommissionCurrentMonth = 0;
   double superAgentCommissionAvailable = 0;
@@ -83,6 +92,7 @@ class _HomePageState extends State<HomePage> {
   late List<String> quickSendImages;
   final String uid = FirebaseAuth.instance.currentUser!.uid;
   StreamSubscription<QuerySnapshot>? _sentSub;
+  StreamSubscription<QuerySnapshot>? _cardTxSub;
   StreamSubscription<QuerySnapshot>? _receivedSub;
   StreamSubscription<QuerySnapshot>? _cpSub;
   StreamSubscription<QuerySnapshot>? _receivedCpSub;
@@ -124,6 +134,80 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> fetchBusinessCustomer() async {
     await fetchAndPrintCustomer();
+  }
+
+  Future<void> _fastLoadHeader() async {
+    try {
+      final results = await Future.wait([
+        FirebaseFirestore.instance.collection('businesses').doc(uid).get(),
+        FirebaseFirestore.instance.collection('users').doc(uid).get(),
+        FirebaseFirestore.instance.collection('standUsers').doc(uid).get(),
+      ]);
+
+      final busSnap = results[0];
+      final userSnap = results[1];
+      final standSnap = results[2];
+
+      String name = '';
+      String phone = '';
+      String tag = '';
+      String? accountId;
+
+      // Determine primary account and its balance
+      if (busSnap.exists) {
+        final d = busSnap.data() as Map<String, dynamic>;
+        final bd = d['business_data'] as Map<String, dynamic>?;
+        name = bd?['name'] ?? d['businessName'] ?? '';
+        final va =
+            d['safehavenData']?['virtualAccount']?['data']
+                as Map<String, dynamic>?;
+        phone = va?['attributes']?['accountNumber']?.toString() ?? '';
+        accountId = va?['id']?.toString();
+        tag = name.replaceAll(' ', '_');
+      } else if (userSnap.exists) {
+        final d = userSnap.data() as Map<String, dynamic>;
+        final first = d['firstName'] ?? '';
+        final last = d['lastName'] ?? '';
+        name = '$first $last'.trim();
+        tag = d['userName'] ?? '';
+        final va = getVirtualAccountData(d);
+        phone = va?['attributes']?['accountNumber']?.toString() ?? '';
+        accountId = va?['id']?.toString();
+      } else if (standSnap.exists) {
+        final d = standSnap.data() as Map<String, dynamic>;
+        tag = d['userName'] ?? '';
+        // For stand users we might not have a direct accountId here, will be fetched later.
+      }
+
+      // Fetch balance if we have an accountId
+      double balance = 0.0;
+      if (accountId != null) {
+        try {
+          balance = await sudoFetchAccountBalance(accountId);
+        } catch (e) {
+          debugPrint('[FastLoad] Balance fetch failed: $e');
+        }
+      }
+
+      if (!mounted) return;
+setState(() {
+  if (name.isNotEmpty) userName = name;
+  if (tag.isNotEmpty) userTag = tag;
+  if (phone.isNotEmpty && businesses.isNotEmpty) {
+    businesses[0]['phone'] = phone;
+  }
+  businesses[0]['balance'] = balance;
+  _headerLoaded = true;
+  _balanceLoaded = true;   // ✅ balance is now known
+  _balanceVisible = true;
+});
+    } catch (e) {
+      debugPrint('[FastLoad] Error: $e');
+      if (mounted)
+        setState(
+          () => _headerLoaded = true,
+        ); // still mark loaded to avoid eternal spinner
+    }
   }
 
   Future<double> _fetchCurrentMonthCommissionsTotal(String businessId) async {
@@ -183,6 +267,22 @@ class _HomePageState extends State<HomePage> {
     quickSendImages = List<String>.from(
       businesses[_currentBusinessIndex]['contacts'],
     );
+
+    // Phase 1: load header data (name, account number, tag, balance)
+    _fastLoadHeader().then((_) {
+      // Phase 2: load everything else in the background
+      _fetchBusinessData();
+      _initTransactionStreams(); // we'll create this method
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        createStroWalletUser();
+        await _reconcilePendingAtmTransactions();
+        await _backfillAtmTransactionsFromStatement();
+        await _checkForUpdate();
+      });
+    });
+  }
+
+  void _initTransactionStreams() {
     _sentSub = FirebaseFirestore.instance
         .collection('transactions')
         .where(
@@ -194,58 +294,41 @@ class _HomePageState extends State<HomePage> {
         .orderBy('timestamp', descending: true)
         .limit(200)
         .snapshots()
-        .listen(
-          (snap) {
-            if (mounted)
-              setState(() {
-                sentDocs = snap.docs;
-              });
-          },
-          onError: (e) {
-            debugPrint('Sent transactions stream error: $e');
-          },
-        );
+        .listen((snap) {
+          if (mounted) setState(() => _recentTxSentDocs = snap.docs);
+        }, onError: (e) => debugPrint('Sent tx stream error: $e'));
+
     _receivedSub = FirebaseFirestore.instance
         .collection('transactions')
         .where('receiverId', isEqualTo: uid)
         .orderBy('timestamp', descending: true)
         .limit(200)
         .snapshots()
-        .listen(
-          (snap) {
-            if (mounted)
-              setState(() {
-                receivedDocs = snap.docs;
-              });
-          },
-          onError: (e) {
-            debugPrint('Received transactions stream error: $e');
-          },
-        );
+        .listen((snap) {
+          if (mounted) setState(() => _recentTxReceivedDocs = snap.docs);
+        });
+
     _cpSub = FirebaseFirestore.instance
         .collection('counterparties')
         .where('userId', isEqualTo: uid)
         .snapshots()
-        .listen(
-          (snap) {
-            if (mounted) {
-              setState(() {
-                cpIds = snap.docs.map((doc) => doc.id).toList();
-                _updateCpStream();
-              });
-            }
-          },
-          onError: (e) {
-            debugPrint('Counterparties stream error: $e');
-          },
-        );
-    _fetchBusinessData();
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      createStroWalletUser();
-      await _reconcilePendingAtmTransactions();
-      await _backfillAtmTransactionsFromStatement();
-      await _checkForUpdate();
-    });
+        .listen((snap) {
+          if (mounted) {
+            setState(() => cpIds = snap.docs.map((doc) => doc.id).toList());
+            _updateCpStream();
+          }
+        });
+
+    _cardTxSub = FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .collection('transactions')
+        .orderBy('timestamp', descending: true)
+        .limit(20)
+        .snapshots()
+        .listen((snap) {
+          if (mounted) setState(() => _recentCardTxDocs = snap.docs);
+        });
   }
 
   Future<void> createStroWalletUser() async {
@@ -548,6 +631,8 @@ class _HomePageState extends State<HomePage> {
 
         if (busSnap.exists) {
           Map<String, dynamic> data = busSnap.data() as Map<String, dynamic>;
+
+          kybVerificationSubmitted = data['kybVerification'] != null;
 
           isSuperAgent = data['isSuperAgent'] == true;
           storefrontEnabledLocal = data['storefront']?['enabled'] == true;
@@ -1054,6 +1139,8 @@ class _HomePageState extends State<HomePage> {
     _receivedSub?.cancel();
     _cpSub?.cancel();
     _receivedCpSub?.cancel();
+    _cardTxSub?.cancel(); // ✅ add this
+
     super.dispose();
   }
 
@@ -1084,16 +1171,6 @@ class _HomePageState extends State<HomePage> {
   String get _storefrontUrl {
     final cleanTag = (userTag ?? '').trim().toLowerCase();
     return cleanTag.isEmpty ? '' : 'https://$cleanTag.padipay.co';
-  }
-
-  void _copyStorefrontUrl() {
-    final storefrontUrl = _storefrontUrl;
-    if (storefrontUrl.isEmpty) return;
-    Clipboard.setData(ClipboardData(text: storefrontUrl));
-    showToast('Storefront link copied', Colors.green);
-    Future.delayed(const Duration(seconds: 15), () {
-      Clipboard.setData(const ClipboardData(text: ''));
-    });
   }
 
   Future<void> _openStorefrontManagement() async {
@@ -1702,96 +1779,7 @@ class _HomePageState extends State<HomePage> {
                                         ),
                                       ],
                                     ),
-                                    if (storefrontEnabled &&
-                                        _storefrontUrl.isNotEmpty) ...[
-                                      SizedBox(height: 10),
-                                      Row(
-                                        children: [
-                                          Expanded(
-                                            child: Container(
-                                              padding:
-                                                  const EdgeInsets.symmetric(
-                                                    horizontal: 12,
-                                                    vertical: 10,
-                                                  ),
-                                              decoration: BoxDecoration(
-                                                color: Colors.white.withValues(
-                                                  alpha: 0.18,
-                                                ),
-                                                borderRadius:
-                                                    BorderRadius.circular(14),
-                                              ),
-                                              child: Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
-                                                children: [
-                                                  Text(
-                                                    'Storefront URL',
-                                                    style: GoogleFonts.inter(
-                                                      color: Colors.white70,
-                                                      fontSize: 10,
-                                                      fontWeight:
-                                                          FontWeight.w500,
-                                                    ),
-                                                  ),
-                                                  const SizedBox(height: 4),
-                                                  Text(
-                                                    _storefrontUrl,
-                                                    maxLines: 1,
-                                                    overflow:
-                                                        TextOverflow.ellipsis,
-                                                    style: GoogleFonts.inter(
-                                                      color: Colors.white,
-                                                      fontSize: 11,
-                                                      fontWeight:
-                                                          FontWeight.w600,
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                          ),
-                                          const SizedBox(width: 8),
-                                          GestureDetector(
-                                            onTap: _copyStorefrontUrl,
-                                            child: Container(
-                                              padding: const EdgeInsets.all(10),
-                                              decoration: BoxDecoration(
-                                                color: Colors.white.withValues(
-                                                  alpha: 0.18,
-                                                ),
-                                                borderRadius:
-                                                    BorderRadius.circular(12),
-                                              ),
-                                              child: const Icon(
-                                                FontAwesomeIcons.link,
-                                                color: Colors.white,
-                                                size: 16,
-                                              ),
-                                            ),
-                                          ),
-                                          const SizedBox(width: 8),
-                                          GestureDetector(
-                                            onTap: _openStorefrontManagement,
-                                            child: Container(
-                                              padding: const EdgeInsets.all(10),
-                                              decoration: BoxDecoration(
-                                                color: Colors.white.withValues(
-                                                  alpha: 0.18,
-                                                ),
-                                                borderRadius:
-                                                    BorderRadius.circular(12),
-                                              ),
-                                              child: const Icon(
-                                                Icons.settings,
-                                                color: Colors.white,
-                                                size: 18,
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ],
+
                                     SizedBox(height: 15),
                                     Column(
                                       crossAxisAlignment:
@@ -1811,35 +1799,35 @@ class _HomePageState extends State<HomePage> {
                                       ],
                                     ),
                                     SizedBox(height: 5),
-                                    Row(
-                                      children: [
-                                        if (_isLoadingBalance)
-                                          CircularProgressIndicator(
-                                            color: Colors.white,
-                                          )
-                                        else
-                                          Text(
-                                            _balanceVisible
-                                                ? "₦${formatNumber(balance)}"
-                                                : "••••••••",
-                                            style: TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 25,
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                        SizedBox(width: 10),
-                                        GestureDetector(
-                                          onTap: _toggleBalanceVisibility,
-                                          child: Icon(
-                                            _balanceVisible
-                                                ? Icons.visibility_off_outlined
-                                                : Icons.visibility_outlined,
-                                            color: Colors.white,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
+                               Row(
+  children: [
+    if (!_balanceLoaded)
+      const SizedBox(
+        width: 20,
+        height: 20,
+        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+      )
+    else
+      Text(
+        _balanceVisible ? "₦${formatNumber(balance)}" : "••••••••",
+        style: const TextStyle(
+          color: Colors.white,
+          fontSize: 25,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    const SizedBox(width: 10),
+    GestureDetector(
+      onTap: _toggleBalanceVisibility,
+      child: Icon(
+        _balanceVisible
+            ? Icons.visibility_off_outlined
+            : Icons.visibility_outlined,
+        color: Colors.white,
+      ),
+    ),
+  ],
+),
                                     if (isSuperAgentUser) ...[
                                       SizedBox(height: 30),
                                       InkWell(
@@ -1961,77 +1949,6 @@ class _HomePageState extends State<HomePage> {
                                       ),
                                     ],
                                     SizedBox(height: 10),
-                                    StreamBuilder<
-                                      DocumentSnapshot<Map<String, dynamic>>
-                                    >(
-                                      stream: FirebaseFirestore.instance
-                                          .collection('users')
-                                          .doc(uid)
-                                          .snapshots(),
-                                      builder: (context, snapshot) {
-                                        final cashback =
-                                            (snapshot.data
-                                                        ?.data()?['cashback']?['balance']
-                                                    as num?)
-                                                ?.toDouble() ??
-                                            0;
-                                        return GestureDetector(
-                                          onTap: () {
-                                            navigateTo(
-                                              context,
-                                              const CashbackHistoryPage(),
-                                              type: NavigationType.push,
-                                            );
-                                          },
-                                          child: Container(
-                                            padding: EdgeInsets.symmetric(
-                                              horizontal: 12,
-                                              vertical: 12,
-                                            ),
-                                            decoration: BoxDecoration(
-                                              borderRadius:
-                                                  BorderRadius.circular(12),
-                                              color: Colors.green.withValues(
-                                                alpha: 0.9,
-                                              ),
-                                            ),
-                                            child: Row(
-                                              children: [
-                                                Icon(
-                                                  Icons.savings_outlined,
-                                                  color: Colors.white
-                                                      .withValues(alpha: 0.9),
-                                                  size: 17,
-                                                ),
-                                                SizedBox(width: 8),
-                                                Text(
-                                                  'Cashback: ',
-                                                  style: TextStyle(
-                                                    color: Colors.white70,
-                                                    fontSize: 12,
-                                                  ),
-                                                ),
-                                                Text(
-                                                  'NGN ${formatNumber(cashback)}',
-                                                  style: TextStyle(
-                                                    color: Colors.white,
-                                                    fontSize: 12,
-                                                    fontWeight: FontWeight.w700,
-                                                  ),
-                                                ),
-                                                SizedBox(width: 6),
-                                                Icon(
-                                                  Icons.chevron_right,
-                                                  color: Colors.white70,
-                                                  size: 16,
-                                                ),
-                                              ],
-                                            ),
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                    SizedBox(height: 30),
                                     Row(
                                       mainAxisAlignment:
                                           MainAxisAlignment.spaceBetween,
@@ -2206,7 +2123,7 @@ class _HomePageState extends State<HomePage> {
                               ? Icons.account_balance
                               : showAwaitingDocsBanner
                               ? Icons.document_scanner
-                              : businessProfileExists
+                              : kybVerificationSubmitted
                               ? Icons.hourglass_bottom
                               : Icons.verified_user,
                           color: primaryColor,
@@ -2223,7 +2140,7 @@ class _HomePageState extends State<HomePage> {
                                   ? "Business Verified – Create Bank Account"
                                   : showAwaitingDocsBanner
                                   ? "Business Documents Required"
-                                  : businessProfileExists
+                                  : kybVerificationSubmitted
                                   ? "Business Verification Pending"
                                   : "Business Verification Required",
                               style: GoogleFonts.inter(
@@ -2239,7 +2156,7 @@ class _HomePageState extends State<HomePage> {
                                     ? "Your business verification is complete. Tap to create your dedicated business bank account."
                                     : showAwaitingDocsBanner
                                     ? "Provide your business documents to complete verification."
-                                    : businessProfileExists
+                                    : kybVerificationSubmitted
                                     ? "Your business verification is under review. "
                                     : "Provide your business details to comply with financial regulations.",
                                 style: TextStyle(
@@ -2438,7 +2355,7 @@ class _HomePageState extends State<HomePage> {
                                             ? "Create Bank Account"
                                             : showAwaitingDocsBanner
                                             ? "Submit Documents"
-                                            : businessProfileExists
+                                            : kybVerificationSubmitted
                                             ? "View Progress"
                                             : "Verify Business",
                                         style: GoogleFonts.inter(
@@ -2457,7 +2374,7 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
             ],
-            if (showStorefrontActivationBanner) ...[
+            if (showStorefrontActivationBanner && businessProfileExists) ...[
               Padding(
                 padding: const EdgeInsets.only(
                   top: 10.0,
@@ -2818,6 +2735,7 @@ class _HomePageState extends State<HomePage> {
                       Text(
                         "Airtime",
                         style: TextStyle(
+                          fontSize: 12,
                           color: Colors.black87,
                           fontWeight: FontWeight.bold,
                         ),
@@ -2833,6 +2751,7 @@ class _HomePageState extends State<HomePage> {
                     Text(
                       "QR Pay",
                       style: TextStyle(
+                        fontSize: 12,
                         color: Colors.black87,
                         fontWeight: FontWeight.bold,
                       ),
@@ -2851,6 +2770,7 @@ class _HomePageState extends State<HomePage> {
                       Text(
                         "Betting",
                         style: TextStyle(
+                          fontSize: 12,
                           color: Colors.black87,
                           fontWeight: FontWeight.bold,
                         ),
@@ -2876,6 +2796,7 @@ class _HomePageState extends State<HomePage> {
                       Text(
                         "Cable TV",
                         style: TextStyle(
+                          fontSize: 12,
                           color: Colors.black87,
                           fontWeight: FontWeight.bold,
                         ),
@@ -2895,6 +2816,7 @@ class _HomePageState extends State<HomePage> {
                       Text(
                         "Data",
                         style: TextStyle(
+                          fontSize: 12,
                           color: Colors.black87,
                           fontWeight: FontWeight.bold,
                         ),
@@ -2914,6 +2836,7 @@ class _HomePageState extends State<HomePage> {
                       Text(
                         "Electricity",
                         style: TextStyle(
+                          fontSize: 12,
                           color: Colors.black87,
                           fontWeight: FontWeight.bold,
                         ),
@@ -2927,201 +2850,524 @@ class _HomePageState extends State<HomePage> {
             SizedBox(height: 40),
             Row(
               children: [
-                SizedBox(width: 16),
-                Text(
-                  "Recent Transactions",
-                  style: GoogleFonts.inter(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 13,
+                Spacer(),
+                InkWell(
+                  onTap: () {
+                    navigateTo(context, CashbackHistoryPage());
+                  },
+                  child: Column(
+                    children: [
+                      Container(
+                        padding: EdgeInsets.all(13),
+
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: Colors.green.withValues(alpha: 0.1),
+                        ),
+                        child: Icon(
+                          Icons.savings,
+                          color: Colors.green,
+                          size: 30,
+                        ),
+                      ),
+                      SizedBox(height: 10),
+                      Text(
+                        "Cashback",
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.black87,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
                 Spacer(),
-                GestureDetector(
+                InkWell(
                   onTap: () {
-                    navigateTo(context, TransactionsHistory());
+                    _openStorefrontManagement();
                   },
-                  child: Text(
-                    "See All",
-                    style: GoogleFonts.inter(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 13,
-                      color: primaryColor,
+                  child: Column(
+                    children: [
+                      Container(
+                        padding: EdgeInsets.all(13),
+
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: Colors.blueGrey.withValues(alpha: 0.1),
+                        ),
+                        child: Icon(
+                          Icons.business,
+                          color: Colors.blueGrey,
+                          size: 30,
+                        ),
+                      ),
+                      SizedBox(height: 10),
+                      Text(
+                        "Storefront",
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.black87,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Spacer(),
+                Visibility(
+                  visible: false,
+                  maintainSize: true,
+                  maintainState: true,
+                  maintainAnimation: true,
+                  child: InkWell(
+                    onTap: () async {
+                      await _openStorefrontManagement();
+                    },
+                    child: Column(
+                      children: [
+                        Image.asset("assets/electricity.png", width: 50),
+                        SizedBox(height: 10),
+                        Text(
+                          "Electricity",
+                          style: TextStyle(
+                            color: Colors.black87,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-                SizedBox(width: 16),
+                Spacer(),
               ],
             ),
-            SizedBox(height: 10),
-            Builder(
-              builder: (context) {
-                List<QueryDocumentSnapshot> docs = [
-                  ...sentDocs,
-                  ...receivedDocs,
-                  ...receivedCpDocs,
-                ];
-                Map<String, QueryDocumentSnapshot> uniqueDocs = {};
-                for (var doc in docs) {
-                  uniqueDocs[doc.id] = doc;
-                }
-                List<QueryDocumentSnapshot> uniqueList = uniqueDocs.values
-                    .toList();
+            SizedBox(height: 40),
 
-                final filteredDocs = uniqueList.where((doc) {
-                  final data = doc.data() as Map<String, dynamic>;
-                  final type = data['type'];
-                  return type != 'va_settlement' &&
-                      type != 'va_settlement_failed';
-                }).toList();
-
-                final sortedDocs = filteredDocs
-                  ..sort((a, b) {
-                    final aData = a.data() as Map<String, dynamic>;
-                    final bData = b.data() as Map<String, dynamic>;
-
-                    final aTimestamp =
-                        (aData['timestamp'] as Timestamp?)?.toDate() ??
-                        (aData['createdAtFirestore'] as Timestamp?)?.toDate() ??
-                        DateTime.fromMillisecondsSinceEpoch(0);
-
-                    final bTimestamp =
-                        (bData['timestamp'] as Timestamp?)?.toDate() ??
-                        (bData['createdAtFirestore'] as Timestamp?)?.toDate() ??
-                        DateTime.fromMillisecondsSinceEpoch(0);
-
-                    return bTimestamp.compareTo(aTimestamp);
-                  });
-
-                final firstFour = sortedDocs.take(4).toList();
-
-                if (firstFour.isEmpty) {
-                  return const Center(child: Text('No recent transactions'));
-                }
-                return Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    children: firstFour.map((doc) {
-                      final data = doc.data() as Map<String, dynamic>;
-                      final type = data['type']?.toString().toLowerCase() ?? '';
-                      bool isOutgoing = true;
-                      String otherId = '';
-                      if (type == 'transfer' || type == "ghost_transfer") {
-                        if (data['userId'] == uid ||
-                            data['actualSender'] == uid) {
-                          isOutgoing = true;
-                          otherId = data['receiverId'] ?? '';
-                        } else {
-                          isOutgoing = false;
-                          otherId = data['userId'] ?? '';
-                        }
-                      } else {
-                        isOutgoing = true;
-                        otherId = '';
-                      }
-                      final icon = getIcon(type, isOutgoing);
-                      final amountSign =
-                          (!isOutgoing ||
-                              type == "deposit" ||
-                              type == "giveaway_claim")
-                          ? '+'
-                          : '-';
-                      final status = getStatus(data);
-                      Color statusColor = Colors.grey;
-                      if ([
-                        'success',
-                        'completed',
-                        'successful',
-                      ].contains(status)) {
-                        statusColor = Colors.green;
-                      } else if (['pending', 'to be paid'].contains(status)) {
-                        statusColor = Colors.orange;
-                      } else if (['failed', 'unsuccessful'].contains(status)) {
-                        statusColor = Colors.red;
-                      } else if (status == 'reversed') {
-                        statusColor = Colors.grey;
-                      }
-                      Color bgColor = Colors.blue.withValues(alpha: 0.1);
-                      Color iconColor = Colors.blue;
-                      Offset offset = Offset.zero;
-                      if (type == 'transfer') {
-                        bgColor = isOutgoing
-                            ? const Color(0xFFFDC3F5).withOpacity(0.49)
-                            : Colors.green.withValues(alpha: 0.1);
-                        iconColor = isOutgoing
-                            ? const Color(0xFFE103E5)
-                            : Colors.green;
-                        if (isOutgoing) {
-                          offset = const Offset(-2, 2);
-                        }
-                      }
-                      if (type.contains("ghost")) {
-                        bgColor = Colors.grey.shade200;
-                        iconColor = Colors.grey.shade600;
-                      }
-                      if (type.contains("giveaway")) {
-                        bgColor = Colors.yellow.shade200;
-                        iconColor = Colors.yellow.shade900;
-                      }
-                      final date =
-                          (data['timestamp'] as Timestamp?)?.toDate() ??
-                          (data['createdAtFirestore'] as Timestamp?)
-                              ?.toDate() ??
-                          DateTime.now();
-                      final formattedTime = DateFormat('HH:mm').format(date);
-                      final formattedDate = DateFormat(
-                        'MMMM d, yyyy',
-                      ).format(date);
-                      final initialName =
-                          data['senderName'] ??
-                          data['senderAccountName'] ??
-                          data['originatorName'] ??
-                          data['nameEnquiry']?['accountName'] ??
-                          data['api_response']?['data']?['attributes']?['nameEnquiry']?['accountName'] ??
-                          data['recipientName'] ??
-                          data['phoneNumber'] ??
-                          data['meterNumber'] ??
-                          data['smartcard_number'] ??
-                          data['account_number'] ??
-                          'Unknown';
-                      final amountInNaira =
-                          ((data['amount'] as num?) ??
-                          (data['debitAmount'] as num? ?? 0));
-                      final formattedAmount = NumberFormat(
-                        '#,##0.00',
-                      ).format(amountInNaira);
-                      final reference =
-                          data['reference'] ??
-                          (data['api_response']?['data']?['attributes']?['reference']
-                              as String?) ??
-                          (data['transactionId'] as String?) ??
-                          '';
-                      return TransactionItem(
-                        docId: doc.id,
-                        icon: icon,
-                        otherId: otherId,
-                        amount: '$amountSign₦$formattedAmount',
-                        formattedTime: formattedTime,
-                        formattedDate: formattedDate,
-                        status: status,
-                        statusColor: statusColor,
-                        isOutgoing: isOutgoing,
-                        otherName: initialName,
-                        type: type,
-                        reference: reference,
-                        bgColor: bgColor,
-                        iconColor: iconColor,
-                        offset: offset,
-                      );
-                    }).toList(),
-                  ),
-                );
-              },
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16.0),
+              child: _buildRecentTransactionsSection(),
             ),
           ],
         ),
         SizedBox(height: 150),
       ],
     );
+  }
+
+  Widget _buildRecentTransactionsSection() {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final recentDocs = _getMergedRecentTransactions(limit: 5);
+
+    // Build 5 most recent unique recipients for the "Recents" row
+    final List<Map<String, dynamic>> recentRecipients = [];
+    final Set<String> seenRecipientKeys = {};
+    for (final doc in _getMergedRecentTransactions(limit: 50)) {
+      final data = doc.data() as Map<String, dynamic>;
+      final type = data['type']?.toString().toLowerCase() ?? '';
+      if (type != 'transfer' && type != 'ghost_transfer') continue;
+      final isOutgoing = data['userId'] == uid || data['actualSender'] == uid;
+      if (!isOutgoing) continue;
+      final recipientName =
+          data['recipientName']?.toString() ??
+          data['account_number']?.toString() ??
+          'Unknown';
+      final key =
+          data['account_number']?.toString() ??
+          data['receiverId']?.toString() ??
+          recipientName;
+      if (seenRecipientKeys.contains(key)) continue;
+      seenRecipientKeys.add(key);
+      recentRecipients.add(data);
+      if (recentRecipients.length >= 5) break;
+    }
+
+    final bool hasData = recentDocs.isNotEmpty || recentRecipients.isNotEmpty;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Section header
+        SizedBox(height: 30),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              'Transaction History',
+              style: GoogleFonts.inter(
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
+              ),
+            ),
+            GestureDetector(
+              onTap: () => navigateTo(
+                context,
+                TransactionsHistory(),
+                type: NavigationType.push,
+              ),
+              child: Text(
+                'See All',
+                style: GoogleFonts.inter(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: primaryColor,
+                ),
+              ),
+            ),
+          ],
+        ),
+
+        // Recents row (horizontal avatars of recent transfer recipients)
+        if (recentRecipients.isNotEmpty) ...[
+          const SizedBox(height: 14),
+          SizedBox(
+            height: 72,
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              itemCount: recentRecipients.length,
+              itemBuilder: (context, index) {
+                final r = recentRecipients[index];
+                final name = r['recipientName']?.toString() ?? 'Unknown';
+                final initials = name.trim().isEmpty
+                    ? '?'
+                    : name
+                          .trim()
+                          .split(' ')
+                          .where((s) => s.isNotEmpty)
+                          .take(2)
+                          .map((s) => s[0].toUpperCase())
+                          .join();
+                return GestureDetector(
+                  onTap: () => navigateTo(
+                    context,
+                    TransactionsHistory(),
+                    type: NavigationType.push,
+                  ),
+                  child: Container(
+                    margin: const EdgeInsets.only(right: 16),
+                    child: Column(
+                      children: [
+                        CircleAvatar(
+                          radius: 24,
+                          backgroundColor: primaryColor.withValues(alpha: 0.15),
+                          child: Text(
+                            initials,
+                            style: GoogleFonts.inter(
+                              color: primaryColor,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        SizedBox(
+                          width: 52,
+                          child: Text(
+                            name.split(' ').first,
+                            textAlign: TextAlign.center,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.black54,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+
+        const SizedBox(height: 14),
+
+        // Last 5 transactions list
+        if (_isLoadingTransactions)
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 32),
+            alignment: Alignment.center,
+            child: CircularProgressIndicator(
+              color: primaryColor,
+              strokeWidth: 2,
+            ),
+          )
+        else if (recentDocs.isEmpty)
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 32),
+            alignment: Alignment.center,
+            child: Column(
+              children: [
+                Icon(Icons.receipt_long, size: 48, color: Colors.grey.shade300),
+                const SizedBox(height: 8),
+                Text(
+                  'No transactions yet',
+                  style: GoogleFonts.inter(
+                    color: Colors.grey.shade500,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+          )
+        else
+          ListView.separated(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: recentDocs.length,
+            separatorBuilder: (_, __) =>
+                Divider(height: 1, color: Colors.grey.shade100),
+            itemBuilder: (context, index) {
+              final doc = recentDocs[index];
+              final data = doc.data() as Map<String, dynamic>;
+              final type = data['type']?.toString().toLowerCase() ?? '';
+              final bool isOutgoing =
+                  type != 'transfer' && type != 'ghost_transfer'
+                  ? true
+                  : (data['userId'] == uid || data['actualSender'] == uid);
+              final otherId = isOutgoing
+                  ? (data['receiverId'] ?? '')
+                  : (data['userId'] ?? '');
+
+              Color bgColor = const Color(0xFFE3F2FD);
+              Color iconColor = const Color(0xFF1565C0);
+              Offset offset = Offset.zero;
+              if (type == 'transfer') {
+                bgColor = isOutgoing
+                    ? const Color(0xFFF3E5F5)
+                    : const Color(0xFFE8F5E9);
+                iconColor = isOutgoing
+                    ? const Color(0xFF7B1FA2)
+                    : const Color(0xFF2E7D32);
+                if (isOutgoing) offset = const Offset(-2, 2);
+              } else if (type.contains('ghost')) {
+                bgColor = const Color(0xFFECEFF1);
+                iconColor = const Color(0xFF37474F);
+              } else if (type.contains('giveaway')) {
+                bgColor = const Color(0xFFFFF8E1);
+                iconColor = const Color(0xFFFF6F00);
+              } else if (type == 'deposit' ||
+                  type == 'fund' ||
+                  type == 'add_money') {
+                bgColor = const Color(0xFFE8F5E9);
+                iconColor = const Color(0xFF2E7D32);
+              } else if (type == 'card_debit') {
+                bgColor = const Color(0xFFFFF3E0);
+                iconColor = const Color(0xFFE65100);
+              } else if (type == 'card_declined') {
+                bgColor = const Color(0xFFFFEBEE);
+                iconColor = const Color(0xFFC62828);
+              } else if (type == 'card_refund') {
+                bgColor = const Color(0xFFE8F5E9);
+                iconColor = const Color(0xFF2E7D32);
+              }
+
+              final isCardTx =
+                  type == 'card_debit' ||
+                  type == 'card_declined' ||
+                  type == 'card_refund';
+              final amountSign = type == 'card_refund'
+                  ? '+'
+                  : type == 'card_declined'
+                  ? '' // declined = no debit occurred
+                  : (!isOutgoing ||
+                        type == 'deposit' ||
+                        type == 'giveaway_claim' ||
+                        type == 'add_money' ||
+                        type == 'fund')
+                  ? '+'
+                  : '-';
+              final amountValue =
+                  ((data['amount'] as num?) ??
+                  (data['debitAmount'] as num?) ??
+                  0);
+              final formattedAmount = NumberFormat(
+                '#,##0.00',
+              ).format(amountValue);
+
+              final date = _txDocDate(data);
+              final formattedTime = DateFormat('HH:mm').format(date);
+              final formattedDate = DateFormat('MMM d, yyyy').format(date);
+
+              final name = isCardTx
+                  ? (data['merchant'] ?? 'Card Transaction')
+                  : data['senderName'] ??
+                        data['debitAccountName'] ??
+                        data['originatorAccountName'] ??
+                        data['counterParty']?['accountName'] ??
+                        data['recipientName'] ??
+                        data['phoneNumber'] ??
+                        data['meterNumber'] ??
+                        data['smartcard_number'] ??
+                        data['account_number'] ??
+                        'Unknown';
+
+              final reference =
+                  data['reference']?.toString() ??
+                  (data['api_response']?['data']?['attributes']?['reference']
+                      as String?) ??
+                  (data['transactionId'] as String?) ??
+                  '';
+
+              final status = _getStatus(data);
+              final Color statusColor;
+              if (type == 'card_debit' || type == 'card_refund') {
+                statusColor = Colors.green;
+              } else if (type == 'card_declined') {
+                statusColor = Colors.red;
+              } else {
+                statusColor = _getStatusColor(status);
+              }
+              final Color amountColor = isCardTx
+                  ? (type == 'card_refund'
+                        ? Colors.green
+                        : type == 'card_declined'
+                        ? Colors.grey.shade600
+                        : Colors.red)
+                  : statusColor;
+              final statusDisplay = isCardTx
+                  ? (type == 'card_debit'
+                        ? 'Successful'
+                        : type == 'card_declined'
+                        ? 'Declined'
+                        : 'Refunded')
+                  : status.replaceAll('_', ' ').isNotEmpty
+                  ? status.replaceAll('_', ' ')[0].toUpperCase() +
+                        status.replaceAll('_', ' ').substring(1)
+                  : status;
+
+              return Padding(
+                padding: const EdgeInsets.only(top: 12.0),
+                child: TransactionItem(
+                  docId: doc.id,
+                  icon: _txIcon(type, isOutgoing),
+                  otherId: otherId.toString(),
+                  amount: '$amountSign₦$formattedAmount',
+                  amountColor: amountColor,
+                  formattedTime: formattedTime,
+                  formattedDate: formattedDate,
+                  status: statusDisplay,
+                  statusColor: statusColor,
+                  isOutgoing: isOutgoing,
+                  otherName: name.toString(),
+                  type: type,
+                  reference: reference,
+                  bgColor: bgColor,
+                  iconColor: iconColor,
+                  offset: offset,
+                  cardData: isCardTx ? data : null,
+                ),
+              );
+            },
+          ),
+      ],
+    );
+  }
+
+  List<DocumentSnapshot> _getMergedRecentTransactions({int limit = 5}) {
+    final Map<String, DocumentSnapshot> seen = {};
+    for (final doc in [
+      ..._recentTxSentDocs,
+      ..._recentTxReceivedDocs,
+      ..._recentCardTxDocs,
+    ]) {
+      seen[doc.id] = doc;
+    }
+    const excludedTypes = {'card_created', 'card_failed'};
+    final sorted =
+        seen.values.where((doc) {
+          final type =
+              (doc.data() as Map<String, dynamic>)['type']?.toString() ?? '';
+          return !excludedTypes.contains(type);
+        }).toList()..sort((a, b) {
+          final aDate = _txDocDate(a.data() as Map<String, dynamic>);
+          final bDate = _txDocDate(b.data() as Map<String, dynamic>);
+          return bDate.compareTo(aDate);
+        });
+    return sorted.take(limit).toList();
+  }
+
+  DateTime _txDocDate(Map<String, dynamic> data) {
+    final dynamic ts =
+        data['timestamp'] ??
+        data['createdAtFirestore'] ??
+        data['createdAt'] ??
+        data['createdAtUtc'];
+    if (ts == null) return DateTime.fromMillisecondsSinceEpoch(0);
+    if (ts is Timestamp) return ts.toDate();
+    if (ts is DateTime) return ts;
+    if (ts is int) return DateTime.fromMillisecondsSinceEpoch(ts);
+    if (ts is String) {
+      try {
+        return DateTime.parse(ts);
+      } catch (_) {
+        return DateTime.fromMillisecondsSinceEpoch(0);
+      }
+    }
+    return DateTime.fromMillisecondsSinceEpoch(0);
+  }
+
+  IconData _txIcon(String type, bool isOutgoing) {
+    switch (type.toLowerCase()) {
+      case 'transfer':
+        return isOutgoing ? FontAwesomeIcons.paperPlane : Icons.arrow_downward;
+      case 'airtime':
+        return FontAwesomeIcons.phone;
+      case 'data':
+      case 'mobile_data':
+        return FontAwesomeIcons.wifi;
+      case 'electricity':
+        return FontAwesomeIcons.bolt;
+      case 'cable':
+        return Icons.tv;
+      case 'add_money':
+      case 'fund':
+      case 'deposit':
+        return Icons.arrow_downward;
+      case 'giveaway_claim':
+      case 'giveaway_create':
+        return FontAwesomeIcons.gift;
+      case 'ghost_transfer':
+        return FontAwesomeIcons.ghost;
+      case 'card_debit':
+        return Icons.credit_card;
+      case 'card_declined':
+        return Icons.credit_card;
+      case 'card_refund':
+        return Icons.undo;
+      default:
+        return FontAwesomeIcons.exchangeAlt;
+    }
+  }
+
+  String _getStatus(Map<String, dynamic> data) {
+    if (data['status'] != null) {
+      return data['status'].toString().toLowerCase();
+    }
+    if (data['api_response']?['data']?['attributes']?['status'] != null) {
+      return data['api_response']['data']['attributes']['status']
+          .toString()
+          .toLowerCase();
+    }
+    if (data['fullData']?['attributes']?['status'] != null) {
+      return data['fullData']['attributes']['status'].toString().toLowerCase();
+    }
+    return 'unknown';
+  }
+
+  Color _getStatusColor(String status) {
+    if (['success', 'completed', 'successful', 'approved'].contains(status)) {
+      return Colors.green;
+    } else if (['pending', 'to be paid'].contains(status)) {
+      return Colors.orange;
+    } else if (['failed', 'unsuccessful', 'declined'].contains(status)) {
+      return Colors.red;
+    } else if (status == 'reversed') {
+      return Colors.grey;
+    }
+    return Colors.grey;
   }
 }
 
