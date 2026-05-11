@@ -1810,12 +1810,46 @@ class _TransactionsHistoryState extends State<TransactionsHistory> {
                                     'status': data['status'] ?? 'success',
                                   };
                                 }
+                                // amount text color rules:
+                                // - failed/declined => red
+                                // - pending => orange
+                                // - otherwise decide from displayed sign: '+' => green, '-' => gray
+                                Color amountTextColor;
+                                final isFailedStatus = [
+                                  'failed',
+                                  'unsuccessful',
+                                  'declined'
+                                ].contains(status);
+                                final isPendingStatus = [
+                                  'pending',
+                                  'to be paid'
+                                ].contains(status);
+                                if (isFailedStatus) {
+                                  amountTextColor = Colors.red;
+                                } else if (isPendingStatus) {
+                                  amountTextColor = Colors.orange;
+                                } else {
+                                  if (type == 'card_declined') {
+                                    amountTextColor = Colors.grey.shade600;
+                                  } else if (type == 'card_refund') {
+                                    amountTextColor = Colors.green;
+                                  } else {
+                                    if (amountSign.startsWith('+')) {
+                                      amountTextColor = Colors.green;
+                                    } else if (amountSign.startsWith('-')) {
+                                      amountTextColor = Colors.grey.shade600;
+                                    } else {
+                                      amountTextColor = Colors.grey.shade600;
+                                    }
+                                  }
+                                }
+
                                 return TransactionItem(
                                   docId: doc.id,
                                   icon: icon,
                                   otherId: otherId,
                                   amount: '$amountSign₦$formattedAmount',
-                                  amountColor: statusColor,
+                                  amountColor: amountTextColor,
                                   formattedTime: formattedTime,
                                   formattedDate: formattedDate,
                                   status: status,

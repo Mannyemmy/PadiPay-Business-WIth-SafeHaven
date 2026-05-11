@@ -473,6 +473,7 @@ class _ReceiptPageState extends State<ReceiptPage> {
     setState(() {
       transactionType = type;
       amount = (data['amount'] ?? 0).toString();
+      _fees = (data['data']?['fees'] as num?)?.toDouble() ?? 0.0;
       if (type == 'card_declined')
         status = 'Declined';
       else if (type == 'card_refund')

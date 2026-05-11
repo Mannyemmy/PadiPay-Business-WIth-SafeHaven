@@ -17,6 +17,7 @@ class AtmPaymentSuccessfulPage extends StatefulWidget {
   final String accountNumber;
   final String reference;
   final String fees;
+  final Map<String, dynamic>? cardData;
 
   const AtmPaymentSuccessfulPage({
     super.key,
@@ -30,6 +31,7 @@ class AtmPaymentSuccessfulPage extends StatefulWidget {
     required this.accountNumber,
     required this.reference,
     required this.fees,
+    this.cardData,
   });
 
   @override
@@ -234,7 +236,7 @@ class _AtmPaymentSuccessfulPageState extends State<AtmPaymentSuccessfulPage>
                         onPressed: () {
                           navigateTo(
                             context,
-                            ReceiptPage(reference: widget.reference),
+                            ReceiptPage(reference: widget.reference, cardData: widget.cardData),
                           );
                         },
                         style: ElevatedButton.styleFrom(

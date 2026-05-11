@@ -47,6 +47,7 @@ class _HomePageState extends State<HomePage> {
   String userName = "";
   bool isBusinessAccount = true;
   bool _balanceLoaded = false;
+  bool _firstTransactionDataReceived = false;
   String? userTag = "";
   final bool _isLoadingBalance = false;
   bool showAwaitingDocsBanner = false;
@@ -136,6 +137,15 @@ class _HomePageState extends State<HomePage> {
     await fetchAndPrintCustomer();
   }
 
+  void _markTransactionsLoaded() {
+    if (!_firstTransactionDataReceived && mounted) {
+      setState(() {
+        _firstTransactionDataReceived = true;
+        _isLoadingTransactions = false;
+      });
+    }
+  }
+
   Future<void> _fastLoadHeader() async {
     try {
       final results = await Future.wait([
@@ -190,17 +200,16 @@ class _HomePageState extends State<HomePage> {
       }
 
       if (!mounted) return;
-setState(() {
-  if (name.isNotEmpty) userName = name;
-  if (tag.isNotEmpty) userTag = tag;
-  if (phone.isNotEmpty && businesses.isNotEmpty) {
-    businesses[0]['phone'] = phone;
-  }
-  businesses[0]['balance'] = balance;
-  _headerLoaded = true;
-  _balanceLoaded = true;   // ✅ balance is now known
-  _balanceVisible = true;
-});
+      setState(() {
+        if (name.isNotEmpty) userName = name;
+        if (tag.isNotEmpty) userTag = tag;
+        if (phone.isNotEmpty && businesses.isNotEmpty) {
+          businesses[0]['phone'] = phone;
+        }
+        businesses[0]['balance'] = balance;
+        _headerLoaded = true;
+        _balanceVisible = true;
+      });
     } catch (e) {
       debugPrint('[FastLoad] Error: $e');
       if (mounted)
@@ -273,6 +282,15 @@ setState(() {
       // Phase 2: load everything else in the background
       _fetchBusinessData();
       _initTransactionStreams(); // we'll create this method
+      // After _initTransactionStreams() call inside _fastLoadHeader().then(...)
+      Future.delayed(const Duration(seconds: 5), () {
+        if (mounted && !_firstTransactionDataReceived) {
+          setState(() {
+            _isLoadingTransactions = false;
+            _firstTransactionDataReceived = true;
+          });
+        }
+      });
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         createStroWalletUser();
         await _reconcilePendingAtmTransactions();
@@ -294,9 +312,24 @@ setState(() {
         .orderBy('timestamp', descending: true)
         .limit(200)
         .snapshots()
-        .listen((snap) {
-          if (mounted) setState(() => _recentTxSentDocs = snap.docs);
-        }, onError: (e) => debugPrint('Sent tx stream error: $e'));
+        .listen(
+          (snap) {
+            final filtered = snap.docs.where((doc) {
+              final data = doc.data();
+              final type = data['type']?.toString() ?? '';
+              if (type == 'va_settlement' || type == 'va_settlement_failed')
+                return false;
+              if (data['isInternal'] == true) return false;
+              return true;
+            }).toList();
+            if (mounted) setState(() => _recentTxSentDocs = filtered);
+            _markTransactionsLoaded();
+          },
+          onError: (e) {
+            debugPrint('Sent tx stream error: $e');
+            _markTransactionsLoaded();
+          },
+        );
 
     _receivedSub = FirebaseFirestore.instance
         .collection('transactions')
@@ -304,20 +337,42 @@ setState(() {
         .orderBy('timestamp', descending: true)
         .limit(200)
         .snapshots()
-        .listen((snap) {
-          if (mounted) setState(() => _recentTxReceivedDocs = snap.docs);
-        });
+        .listen(
+          (snap) {
+            final filtered = snap.docs.where((doc) {
+              final data = doc.data();
+              final type = data['type']?.toString() ?? '';
+              if (type == 'va_settlement' || type == 'va_settlement_failed')
+                return false;
+              if (data['isInternal'] == true) return false;
+              return true;
+            }).toList();
+            if (mounted) setState(() => _recentTxReceivedDocs = filtered);
+            _markTransactionsLoaded();
+          },
+          onError: (e) {
+            debugPrint('Received tx stream error: $e');
+            _markTransactionsLoaded();
+          },
+        );
 
     _cpSub = FirebaseFirestore.instance
         .collection('counterparties')
         .where('userId', isEqualTo: uid)
         .snapshots()
-        .listen((snap) {
-          if (mounted) {
-            setState(() => cpIds = snap.docs.map((doc) => doc.id).toList());
-            _updateCpStream();
-          }
-        });
+        .listen(
+          (snap) {
+            if (mounted) {
+              setState(() => cpIds = snap.docs.map((doc) => doc.id).toList());
+              _updateCpStream();
+            }
+            _markTransactionsLoaded();
+          },
+          onError: (e) {
+            debugPrint('Counterparties stream error: $e');
+            _markTransactionsLoaded();
+          },
+        );
 
     _cardTxSub = FirebaseFirestore.instance
         .collection('users')
@@ -326,9 +381,24 @@ setState(() {
         .orderBy('timestamp', descending: true)
         .limit(20)
         .snapshots()
-        .listen((snap) {
-          if (mounted) setState(() => _recentCardTxDocs = snap.docs);
-        });
+        .listen(
+          (snap) {
+            final filtered = snap.docs.where((doc) {
+              final data = doc.data();
+              final type = data['type']?.toString() ?? '';
+              if (type == 'va_settlement' || type == 'va_settlement_failed')
+                return false;
+              if (data['isInternal'] == true) return false;
+              return true;
+            }).toList();
+            if (mounted) setState(() => _recentCardTxDocs = filtered);
+            _markTransactionsLoaded();
+          },
+          onError: (e) {
+            debugPrint('Card tx stream error: $e');
+            _markTransactionsLoaded();
+          },
+        );
   }
 
   Future<void> createStroWalletUser() async {
@@ -995,6 +1065,7 @@ setState(() {
                   : (fullName.isNotEmpty ? fullName : ''));
         userName = displayTopName;
         businesses = allBusinesses;
+        _balanceLoaded = true;
         _currentBusinessIndex = selectedIndex;
         isSuperAgentUser = useSuperAgentMock ? true : isSuperAgent;
         superAgentStars = useSuperAgentMock ? 4 : stars;
@@ -1030,6 +1101,7 @@ setState(() {
       );
     } catch (e) {
       print(e);
+      if (mounted) setState(() => _balanceLoaded = true);
     }
   }
 
@@ -1047,13 +1119,18 @@ setState(() {
         )
         .snapshots()
         .listen((snap) {
-          setState(() {
-            receivedCpDocs = snap.docs;
-          });
+          final filtered = snap.docs.where((doc) {
+            final data = doc.data();
+            final type = data['type']?.toString() ?? '';
+            if (type == 'va_settlement' || type == 'va_settlement_failed')
+              return false;
+            if (data['isInternal'] == true) return false;
+            return true;
+          }).toList();
+          if (mounted) setState(() => receivedCpDocs = filtered);
         });
-  }
+  } // Fetch authoritative bank and accountNumber for a given virtual accountId,
 
-  // Fetch authoritative bank and accountNumber for a given virtual accountId,
   // then update Firestore wallet attributes for both safehavenData and sudoData.
   Future<void> _fetchAndUpdateVirtualAccount(
     String accountId,
@@ -1246,6 +1323,7 @@ setState(() {
     setState(() {
       _currentBusinessIndex = index;
       quickSendImages = List<String>.from(businesses[index]['contacts']);
+      _balanceLoaded = false; // 🔄 Show spinner while loading new balance
     });
 
     final prefs = await SharedPreferences.getInstance();
@@ -1289,6 +1367,7 @@ setState(() {
             parentBusinessName = parentName;
             activeStandId = selectedBusiness['standId'];
             isStandMode = true;
+            _balanceLoaded = true;
           });
         } catch (e) {
           // On error still update display state
@@ -1297,6 +1376,7 @@ setState(() {
             parentBusinessName = parentName;
             activeStandId = selectedBusiness['standId'];
             isStandMode = true;
+            _balanceLoaded = true;
           });
         }
       } else {
@@ -1306,6 +1386,7 @@ setState(() {
           parentBusinessName = parentName;
           activeStandId = selectedBusiness['standId'];
           isStandMode = true;
+          _balanceLoaded = true;
         });
       }
     } else {
@@ -1316,6 +1397,7 @@ setState(() {
         isStandMode = false;
         parentBusinessName = selectedBusiness['name'] ?? '';
         userName = selectedBusiness['name'] ?? '';
+        _balanceLoaded = true;
       });
     }
   }
@@ -1799,35 +1881,40 @@ setState(() {
                                       ],
                                     ),
                                     SizedBox(height: 5),
-                               Row(
-  children: [
-    if (!_balanceLoaded)
-      const SizedBox(
-        width: 20,
-        height: 20,
-        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-      )
-    else
-      Text(
-        _balanceVisible ? "₦${formatNumber(balance)}" : "••••••••",
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 25,
-          fontWeight: FontWeight.bold,
-        ),
-      ),
-    const SizedBox(width: 10),
-    GestureDetector(
-      onTap: _toggleBalanceVisibility,
-      child: Icon(
-        _balanceVisible
-            ? Icons.visibility_off_outlined
-            : Icons.visibility_outlined,
-        color: Colors.white,
-      ),
-    ),
-  ],
-),
+                                    Row(
+                                      children: [
+                                        if (!_balanceLoaded)
+                                          const SizedBox(
+                                            width: 20,
+                                            height: 20,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              color: Colors.white,
+                                            ),
+                                          )
+                                        else
+                                          Text(
+                                            _balanceVisible
+                                                ? "₦${formatNumber(balance)}"
+                                                : "••••••••",
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 25,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        const SizedBox(width: 10),
+                                        GestureDetector(
+                                          onTap: _toggleBalanceVisibility,
+                                          child: Icon(
+                                            _balanceVisible
+                                                ? Icons.visibility_off_outlined
+                                                : Icons.visibility_outlined,
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
                                     if (isSuperAgentUser) ...[
                                       SizedBox(height: 30),
                                       InkWell(
@@ -2158,7 +2245,7 @@ setState(() {
                                     ? "Provide your business documents to complete verification."
                                     : kybVerificationSubmitted
                                     ? "Your business verification is under review. "
-                                    : "Provide your business details to comply with financial regulations.",
+                                    : "Provide your business details to get a dedicated business account.",
                                 style: TextStyle(
                                   color: Colors.grey.shade600,
                                   fontSize: 12,
@@ -3220,13 +3307,36 @@ setState(() {
               } else {
                 statusColor = _getStatusColor(status);
               }
-              final Color amountColor = isCardTx
-                  ? (type == 'card_refund'
-                        ? Colors.green
-                        : type == 'card_declined'
-                        ? Colors.grey.shade600
-                        : Colors.red)
-                  : statusColor;
+
+              // amount text color rules:
+              // - failed/declined => red
+              // - pending => orange
+              // - otherwise decide from displayed sign: '+' => green, '-' => gray
+              Color amountColor;
+              final statusForColor = _getStatus(data);
+              final isFailedStatus = ['failed', 'unsuccessful', 'declined']
+                  .contains(statusForColor);
+              final isPendingStatus = ['pending', 'to be paid']
+                  .contains(statusForColor);
+              if (isFailedStatus) {
+                amountColor = Colors.red;
+              } else if (isPendingStatus) {
+                amountColor = Colors.orange;
+              } else {
+                if (type == 'card_declined') {
+                  amountColor = Colors.grey.shade600;
+                } else if (type == 'card_refund') {
+                  amountColor = Colors.green;
+                } else {
+                  if (amountSign.startsWith('+')) {
+                    amountColor = Colors.green;
+                  } else if (amountSign.startsWith('-')) {
+                    amountColor = Colors.grey.shade600;
+                  } else {
+                    amountColor = Colors.grey.shade600;
+                  }
+                }
+              }
               final statusDisplay = isCardTx
                   ? (type == 'card_debit'
                         ? 'Successful'
@@ -3275,12 +3385,20 @@ setState(() {
     ]) {
       seen[doc.id] = doc;
     }
-    const excludedTypes = {'card_created', 'card_failed'};
+    const excludedTypes = {
+      'card_created',
+      'card_failed',
+      'va_settlement',
+      'va_settlement_failed',
+    };
     final sorted =
         seen.values.where((doc) {
-          final type =
-              (doc.data() as Map<String, dynamic>)['type']?.toString() ?? '';
-          return !excludedTypes.contains(type);
+          final data = doc.data() as Map<String, dynamic>;
+          final type = data['type']?.toString() ?? '';
+          // Exclude by type OR internal flag
+          if (excludedTypes.contains(type)) return false;
+          if (data['isInternal'] == true) return false;
+          return true;
         }).toList()..sort((a, b) {
           final aDate = _txDocDate(a.data() as Map<String, dynamic>);
           final bDate = _txDocDate(b.data() as Map<String, dynamic>);

@@ -436,20 +436,20 @@ class _BankTransferPageState extends State<BankTransferPage> {
         (b) => b?['id'] == selectedBank,
         orElse: () => null,
       )!;
-      await FirebaseFirestore.instance.collection('transactions').add({
-        'userId': user.uid,
-        'type': 'transfer',
-        'bank_code': selectedBank,
-        'account_number': accountNumberController.text,
-        'amount': amountNaira,
-        'reason': remarkController.text,
-        'currency': 'NGN',
-        'api_response': result.data,
-        'reference': result.data['data']['id'],
-        'recipientName': accountNameController.text,
-        'bankName': bank['attributes']['name'],
-        'timestamp': FieldValue.serverTimestamp(),
-      });
+      // await FirebaseFirestore.instance.collection('transactions').add({
+      //   'userId': user.uid,
+      //   'type': 'transfer',
+      //   'bank_code': selectedBank,
+      //   'account_number': accountNumberController.text,
+      //   'amount': amountNaira,
+      //   'reason': remarkController.text,
+      //   'currency': 'NGN',
+      //   'api_response': result.data,
+      //   'reference': result.data['data']['id'],
+      //   'recipientName': accountNameController.text,
+      //   'bankName': bank['attributes']['name'],
+      //   'timestamp': FieldValue.serverTimestamp(),
+      // });
 
       showModalBottomSheet(
         context: context,

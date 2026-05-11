@@ -877,22 +877,37 @@ class _PaymentScreenState extends State<PaymentScreen> {
       String cardData;
       _txStartTime = DateTime.now();
       cardData = await transactionFuture.timeout(
-        const Duration(seconds: 90),
+        const Duration(
+          seconds: 105,
+        ), // 90s shown to user + 15s grace for late callbacks
         onTimeout: () {
-          debugPrint('[Tappa] ⏰ 90s timeout — marking payment as failed');
+          debugPrint(
+            '[Tappa] ⏰ 105s timeout — no late callback arrived, marking failed',
+          );
+          // completeError cleans up the service; safe to call even if already completed
+          TransactionService().completeError(
+            const _PaymentException(
+              _TxFailure(
+                title: 'Payment Failed',
+                detail:
+                    'Transaction timed out. If your customer was debited, please reconcile manually using the RRN.',
+                icon: Icons.timer_off_rounded,
+                color: Color(0xFFE74C3C),
+              ),
+            ),
+          );
+          // completeError threw via the future; this line is unreachable but
+          // required to satisfy the onTimeout return type.
           throw const _PaymentException(
             _TxFailure(
               title: 'Payment Failed',
-              detail:
-                  'Transaction timed out after 90 seconds and was not found. Please try again.',
+              detail: 'Timed out.',
               icon: Icons.timer_off_rounded,
               color: Color(0xFFE74C3C),
             ),
           );
         },
       );
-
-      debugPrint('[Tappa] Transaction response. data=$cardData');
       await _saveTappaLog(
         eventType: 'transaction_success',
         status: 'success',
@@ -909,10 +924,11 @@ class _PaymentScreenState extends State<PaymentScreen> {
         final savedRef = _txRrn;
 
         // Parse fees for display only – transaction already saved by service
+        Map<String, dynamic>? parsedCardData;
         int fees = 0;
         try {
-          final d = jsonDecode(cardData) as Map<String, dynamic>;
-          final dynamic rawFees = d['data']?['fees'];
+          parsedCardData = jsonDecode(cardData) as Map<String, dynamic>;
+          final dynamic rawFees = parsedCardData['data']?['fees'];
           fees = (rawFees as num?)?.toInt() ?? 0;
         } catch (e) {
           debugPrint('[Tappa] Failed to parse fees: $e');
@@ -920,6 +936,8 @@ class _PaymentScreenState extends State<PaymentScreen> {
 
         _amountController.clear();
         _tagController.clear();
+        // After showing the success modal (or before, but after the transaction Future completes)
+        unawaited(_executeSettlement(amountNaira: _rawAmount, rrn: _txRrn));
 
         showModalBottomSheet(
           context: context,
@@ -936,6 +954,7 @@ class _PaymentScreenState extends State<PaymentScreen> {
             accountNumber: '',
             reference: savedRef,
             fees: fees.toString(),
+            cardData: parsedCardData,
           ),
           isScrollControlled: true,
         );
@@ -1126,6 +1145,87 @@ class _PaymentScreenState extends State<PaymentScreen> {
           if (isSuccess) {
             debugPrint('[Tappa] Transaction APPROVED - actual success');
             _playCardDetectedFeedback();
+
+            // ── Late callback: UI timeout already fired ───────────────────
+            if (TransactionService().isCompleted) {
+              debugPrint(
+                '[Tappa] ⚠️ Late success callback after UI timeout — handling directly',
+              );
+
+              // Snapshot screen state NOW before any async gap clears it
+              final lateRrn = _txRrn;
+              final lateAmount = _rawAmount;
+              final lateTag = _tagController.text.trim();
+              final lateCardData = errorMessage;
+
+              await _saveTappaLog(
+                eventType: 'transaction_success_late',
+                status: 'success',
+                amount: _chargedAmount,
+                rrn: lateRrn,
+                cardData: lateCardData,
+                additionalData: {'note': 'arrived after UI timeout'},
+              );
+
+              final saved = await TransactionService().handleLateSuccess(
+                cardData: lateCardData,
+                rrn: lateRrn,
+                amount: lateAmount,
+                tag: lateTag,
+              );
+
+              if (saved) {
+                // Settlement — customer was debited, merchant must receive funds
+                unawaited(
+                  _executeSettlement(amountNaira: lateAmount, rrn: lateRrn),
+                );
+
+                if (mounted) {
+                  Map<String, dynamic>? parsedCardData;
+                  int fees = 0;
+                  try {
+                    parsedCardData =
+                        jsonDecode(lateCardData) as Map<String, dynamic>;
+                    fees =
+                        ((parsedCardData['data']?['fees'] as num?)?.toInt()) ??
+                        0;
+                  } catch (_) {}
+
+                  // Clear any failed/uncertain UI state before showing success
+                  setState(() {
+                    _txStatus = _TxStatus.idle;
+                    _txFailure = null;
+                    _txActive = false;
+                    _amountController.clear();
+                    _tagController.clear();
+                  });
+
+                  showModalBottomSheet(
+                    context: context,
+                    isDismissible: false,
+                    enableDrag: false,
+                    isScrollControlled: true,
+                    builder: (_) => AtmPaymentSuccessfulPage(
+                      amount: lateAmount.toStringAsFixed(0),
+                      actionText: 'New Transaction',
+                      title: 'Payment Received',
+                      description:
+                          'Contactless card payment processed successfully.',
+                      recipientName: '',
+                      bankName: '',
+                      bankCode: '',
+                      accountNumber: '',
+                      reference: lateRrn,
+                      fees: fees.toString(),
+                      cardData: parsedCardData,
+                    ),
+                  );
+                }
+              }
+              return;
+            }
+
+            // ── Normal path: callback arrived before timeout ──────────────
             final elapsed = _txStartTime != null
                 ? DateTime.now().difference(_txStartTime!).inSeconds
                 : 0;

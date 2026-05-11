@@ -17,9 +17,28 @@ import 'package:padi_pay_business/utils.dart';
 import 'package:padi_pay_business/welcome_page.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:audioplayers/audioplayers.dart';
+import 'package:intl/intl.dart';
 
 final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
     FlutterLocalNotificationsPlugin();
+final FlutterTts _flutterTts = FlutterTts();
+final AudioPlayer _neuralAudioPlayer = AudioPlayer();
+bool _ttsConfigured = false;
+String? _ttsConfiguredVoicePreference;
+String? _ttsConfiguredVoiceName;
+String? _ttsConfiguredEnginePackage;
+String? _ttsConfiguredEngineLabel;
+double? _ttsConfiguredPitch;
+double? _ttsConfiguredSpeechRate;
+bool _ttsUsingSyntheticMaleProfile = false;
+bool _ttsGoogleEngineAvailable = false;
+
+const String _voiceAlertsPreferenceKey = 'voiceAlerts';
+const String _voiceAlertSpeakAmountPreferenceKey = 'voiceAlertSpeakAmount';
+const String _voiceAlertGenderPreferenceKey = 'voiceAlertGender';
+const String _voiceAlertLanguagePreferenceKey = 'voiceAlertLanguage';
 
 final ValueNotifier<String?> pendingApprovalNotifier = ValueNotifier(null);
 
@@ -65,6 +84,37 @@ Future<void> _showNotification(RemoteMessage message) async {
   final bool enablePush = prefs.getBool('pushNotification') ?? true;
   if (!enablePush) return;
 
+  final isIncomingPayment = _isIncomingPaymentPayloadLike(
+    message.data,
+    notificationTitle: message.notification?.title,
+    notificationBody: message.notification?.body,
+  );
+
+  final senderName = _extractIncomingSenderName(message.data);
+  final amountNaira = _parseAmountNairaFromPayload(
+    message.data,
+    fallbackBody: message.notification?.body,
+  );
+  final todayTotalNaira = await _resolveTodayReceivedTotalNaira(
+    data: message.data,
+  );
+
+  final incomingBodyLine = amountNaira != null && amountNaira > 0
+      ? '${_formatNaira(amountNaira)} received${senderName == null ? '' : ' from $senderName'}'
+      : (message.data['body'] ??
+                message.notification?.body ??
+                'Payment received')
+            .toString();
+  final incomingSummaryLine = todayTotalNaira != null && todayTotalNaira > 0
+      ? 'Total today: ${_formatNaira(todayTotalNaira)}'
+      : null;
+  const incomingTitle = 'Cash Just Landed! 💰';
+  final incomingBigText = [
+    '<b>$incomingBodyLine</b>',
+    if (incomingSummaryLine != null) incomingSummaryLine,
+    '<i>Tap to view transaction details</i>',
+  ].join('<br/>');
+
   AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
     'padi_transactions_channel',
     'Transactions Notifications',
@@ -76,6 +126,31 @@ Future<void> _showNotification(RemoteMessage message) async {
     autoCancel: true,
   );
 
+  if (isIncomingPayment) {
+    androidDetails = AndroidNotificationDetails(
+      'padi_transactions_channel',
+      'Transactions Notifications',
+      channelDescription: 'Used for transaction notifications.',
+      importance: Importance.max,
+      priority: Priority.max,
+      playSound: true,
+      enableVibration: true,
+      autoCancel: true,
+      category: AndroidNotificationCategory.message,
+      color: const Color(0xFF16C79A),
+      colorized: true,
+      subText: 'Padi Pay Incoming',
+      styleInformation: BigTextStyleInformation(
+        incomingBigText,
+        htmlFormatBigText: true,
+        contentTitle: '<b>$incomingTitle</b>',
+        htmlFormatContentTitle: true,
+        summaryText: incomingSummaryLine ?? 'Padi Pay',
+        htmlFormatSummaryText: true,
+      ),
+    );
+  }
+
   if (message.data['type'] == 'withdrawal_request') {
     androidDetails = AndroidNotificationDetails(
       'padi_transactions_channel',
@@ -86,7 +161,6 @@ Future<void> _showNotification(RemoteMessage message) async {
       playSound: true,
       enableVibration: true,
       autoCancel: true,
-   //   actions: [approveAction, declineAction],
     );
   }
 
@@ -101,12 +175,18 @@ Future<void> _showNotification(RemoteMessage message) async {
 
   await flutterLocalNotificationsPlugin.show(
     Random().nextInt(2147483647),
-    message.data['title'] ??
-        message.notification?.title ??
-        'Notification',
-    message.data['body'] ??
-        message.notification?.body ??
-        '',
+    isIncomingPayment
+        ? incomingTitle
+        : (message.data['title'] ??
+                  message.notification?.title ??
+                  'Notification')
+              .toString(),
+    isIncomingPayment
+        ? ([
+            incomingBodyLine,
+            if (incomingSummaryLine != null) incomingSummaryLine,
+          ].join('\n'))
+        : (message.data['body'] ?? message.notification?.body ?? '').toString(),
     platform,
     payload: jsonEncode(message.data),
   );
@@ -133,7 +213,10 @@ void main() async {
   );
 
 
-  FirebaseMessaging.onMessage.listen(_showNotification);
+  FirebaseMessaging.onMessage.listen((message) async {
+    await _showNotification(message);
+    await _speakIncomingAlert(message);
+  });
 
   // IMPORTANT FIX:
   // Handles taps when app is already open or in foreground.
@@ -255,6 +338,331 @@ Future<void> preloadBalance() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setDouble('cached_balance', balance);
   } catch (_) {}
+}
+
+// =========================================================
+// VOICE ALERTS & NOTIFICATION HELPERS
+// =========================================================
+Future<void> _speakIncomingAlert(RemoteMessage message) async {
+  final prefs = await SharedPreferences.getInstance();
+  final enableVoice = prefs.getBool(_voiceAlertsPreferenceKey) ?? true;
+  if (!enableVoice) return;
+
+  final speakAmount =
+      prefs.getBool(_voiceAlertSpeakAmountPreferenceKey) ?? true;
+  final voiceLanguage = _normalizeVoiceLanguagePreference(
+    prefs.getString(_voiceAlertLanguagePreferenceKey),
+  );
+  final spoken = _buildIncomingAlertSpeech(
+    data: message.data,
+    notificationTitle: message.notification?.title,
+    notificationBody: message.notification?.body,
+    speakAmount: speakAmount,
+    voiceLanguage: voiceLanguage,
+  );
+  if (spoken == null) return;
+
+  try {
+    await _speakIncomingText(text: spoken, voiceLanguage: voiceLanguage);
+  } catch (e) {
+    debugPrint('TTS speak error: $e');
+  }
+}
+
+bool _isIncomingPaymentPayloadLike(
+  Map<String, dynamic> data, {
+  String? notificationTitle,
+  String? notificationBody,
+}) {
+  final type = (data['type'] ?? '').toString().toLowerCase();
+  final title = (data['title'] ?? notificationTitle ?? '')
+      .toString()
+      .toLowerCase();
+  final body = (data['body'] ?? notificationBody ?? '')
+      .toString()
+      .toLowerCase();
+  final text = '$type $title $body';
+
+  final includesIncomingKeyword = [
+    'received',
+    'credited',
+    'deposit',
+    'payment received',
+    'transfer received',
+  ].any(text.contains);
+
+  final includesOutgoingKeyword = [
+    'debited',
+    'withdrawal',
+    'declined',
+    'failed',
+  ].any(text.contains);
+
+  if (type == 'payment_received' || type == 'deposit') {
+    return true;
+  }
+
+  return includesIncomingKeyword && !includesOutgoingKeyword;
+}
+
+String? _buildIncomingAlertSpeech({
+  required Map<String, dynamic> data,
+  String? notificationTitle,
+  String? notificationBody,
+  required bool speakAmount,
+  required String voiceLanguage,
+}) {
+  if (!_isIncomingPaymentPayloadLike(
+    data,
+    notificationTitle: notificationTitle,
+    notificationBody: notificationBody,
+  )) {
+    return null;
+  }
+
+  final amount = _parseAmountNairaFromPayload(
+    data,
+    fallbackBody: notificationBody,
+  );
+
+  if (speakAmount && amount != null && amount > 0) {
+    final rounded = amount.round();
+    if (voiceLanguage == 'pidgin') {
+      return '${_numberToWords(rounded)} naira don land for your PadiPay account';
+    }
+    return '${_numberToWords(rounded)} naira received in your PadiPay account';
+  }
+
+  if (voiceLanguage == 'pidgin') {
+    return 'Payment don land for your PadiPay account';
+  }
+
+  return 'Payment received in your PadiPay account';
+}
+
+Future<Map<String, dynamic>> _speakIncomingText({
+  required String text,
+  required String voiceLanguage,
+}) async {
+  final prefs = await SharedPreferences.getInstance();
+  final voicePreference = _normalizeVoicePreference(
+    prefs.getString(_voiceAlertGenderPreferenceKey),
+  );
+
+  await _flutterTts.stop();
+  final speakResult = await _flutterTts.speak(text);
+  return {
+    'ok': true,
+    'engineUsed': 'device',
+    'voicePreference': voicePreference,
+    'speakResult': speakResult?.toString(),
+  };
+}
+
+String _normalizeVoicePreference(String? value) {
+  final normalized = (value ?? 'female').trim().toLowerCase();
+  if (normalized == 'male') return 'male';
+  return 'female';
+}
+
+String _normalizeVoiceLanguagePreference(String? value) {
+  final normalized = (value ?? 'english').trim().toLowerCase();
+  if (normalized == 'pidgin') return 'pidgin';
+  return 'english';
+}
+
+double? _parseAmountNairaFromPayload(
+  Map<String, dynamic> data, {
+  String? fallbackBody,
+}) {
+  final directCandidates = [
+    data['amount'],
+    data['amountNaira'],
+    data['amount_naira'],
+    data['displayAmount'],
+    data['value'],
+  ];
+
+  for (final candidate in directCandidates) {
+    if (candidate == null) continue;
+    if (candidate is num) return candidate.toDouble();
+    final cleaned = candidate.toString().replaceAll(RegExp(r'[^0-9.]'), '');
+    final parsed = double.tryParse(cleaned);
+    if (parsed != null && parsed > 0) return parsed;
+  }
+
+  final body = (data['body'] ?? fallbackBody ?? '').toString();
+  final match = RegExp(r'([0-9][0-9,]*\.?[0-9]*)').firstMatch(body);
+  if (match != null) {
+    final parsed = double.tryParse(match.group(1)!.replaceAll(',', ''));
+    if (parsed != null && parsed > 0) return parsed;
+  }
+  return null;
+}
+
+String _numberToWords(int number) {
+  const ones = [
+    'zero',
+    'one',
+    'two',
+    'three',
+    'four',
+    'five',
+    'six',
+    'seven',
+    'eight',
+    'nine',
+  ];
+  const teens = [
+    'ten',
+    'eleven',
+    'twelve',
+    'thirteen',
+    'fourteen',
+    'fifteen',
+    'sixteen',
+    'seventeen',
+    'eighteen',
+    'nineteen',
+  ];
+  const tens = [
+    '',
+    '',
+    'twenty',
+    'thirty',
+    'forty',
+    'fifty',
+    'sixty',
+    'seventy',
+    'eighty',
+    'ninety',
+  ];
+
+  if (number < 10) return ones[number];
+  if (number < 20) return teens[number - 10];
+  if (number < 100) {
+    final t = number ~/ 10;
+    final r = number % 10;
+    return r == 0 ? tens[t] : '${tens[t]} ${ones[r]}';
+  }
+  if (number < 1000) {
+    final h = number ~/ 100;
+    final r = number % 100;
+    return r == 0
+        ? '${ones[h]} hundred'
+        : '${ones[h]} hundred ${_numberToWords(r)}';
+  }
+  if (number < 1000000) {
+    final th = number ~/ 1000;
+    final r = number % 1000;
+    return r == 0
+        ? '${_numberToWords(th)} thousand'
+        : '${_numberToWords(th)} thousand ${_numberToWords(r)}';
+  }
+  if (number < 1000000000) {
+    final m = number ~/ 1000000;
+    final r = number % 1000000;
+    return r == 0
+        ? '${_numberToWords(m)} million'
+        : '${_numberToWords(m)} million ${_numberToWords(r)}';
+  }
+  return number.toString();
+}
+
+String? _extractIncomingSenderName(Map<String, dynamic> data) {
+  const senderKeys = ['senderName', 'fromName', 'sender', 'payerName', 'name'];
+  for (final key in senderKeys) {
+    final value = data[key]?.toString().trim();
+    if (value != null && value.isNotEmpty) return value;
+  }
+  return null;
+}
+
+String _formatNaira(double amount) {
+  return '\u20A6${NumberFormat('#,##0').format(amount)}';
+}
+
+Future<double?> _resolveTodayReceivedTotalNaira({
+  required Map<String, dynamic> data,
+}) async {
+  const totalKeys = [
+    'todayTotalReceived',
+    'today_total_received',
+    'totalTodayReceived',
+    'total_today',
+  ];
+  for (final key in totalKeys) {
+    final value = data[key];
+    if (value == null) continue;
+    if (value is num && value > 0) return value.toDouble();
+    final parsed = double.tryParse(value.toString().replaceAll(',', ''));
+    if (parsed != null && parsed > 0) return parsed;
+  }
+
+  final user = FirebaseAuth.instance.currentUser;
+  if (user == null) return null;
+
+  final now = DateTime.now();
+  final start = DateTime(now.year, now.month, now.day);
+  final end = start.add(const Duration(days: 1));
+
+  try {
+    final query = await FirebaseFirestore.instance
+        .collection('transactions')
+        .where('userId', isEqualTo: user.uid)
+        .where('timestamp', isGreaterThanOrEqualTo: Timestamp.fromDate(start))
+        .where('timestamp', isLessThan: Timestamp.fromDate(end))
+        .get();
+
+    double total = 0;
+    for (final doc in query.docs) {
+      final tx = doc.data();
+      if (!_isIncomingTransactionLike(tx)) continue;
+      final amount = _parseAmountNairaFromPayload(tx);
+      if (amount != null && amount > 0) {
+        total += amount;
+      }
+    }
+    return total > 0 ? total : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+bool _isIncomingTransactionLike(Map<String, dynamic> tx) {
+  final status = (tx['status'] ?? tx['rawStatus'] ?? '')
+      .toString()
+      .toLowerCase();
+  if (status.contains('failed') || status.contains('declined')) {
+    return false;
+  }
+
+  final text = [
+    tx['type'],
+    tx['category'],
+    tx['title'],
+    tx['description'],
+    tx['narration'],
+  ].map((e) => (e ?? '').toString().toLowerCase()).join(' ');
+
+  final incomingHit = [
+    'received',
+    'credit',
+    'credited',
+    'deposit',
+    'incoming',
+  ].any(text.contains);
+  final outgoingHit = [
+    'debit',
+    'debited',
+    'withdraw',
+    'transfer sent',
+    'payment sent',
+    'airtime',
+    'bill',
+  ].any(text.contains);
+
+  return incomingHit && !outgoingHit;
 }
 
 // =========================================================

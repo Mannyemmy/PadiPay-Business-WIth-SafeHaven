@@ -17,6 +17,16 @@ import 'package:nfc_manager/nfc_manager.dart';
 import 'package:nfc_manager/nfc_manager_android.dart';
 import 'package:nfc_manager_ndef/nfc_manager_ndef.dart';
 
+/// HOW TO SHOW THIS BOTTOM SHEET (important):
+/// Use these two properties to prevent tap-away dismissal:
+///
+/// showModalBottomSheet(
+///   context: context,
+///   isDismissible: false,   // <-- prevents tapping outside to dismiss
+///   enableDrag: false,      // <-- prevents dragging down to dismiss
+///   builder: (_) => const NFCPromptBottomSheet(),
+/// );
+
 class NFCPromptBottomSheet extends StatefulWidget {
   final bool isReader;
   const NFCPromptBottomSheet({super.key, this.isReader = true});
@@ -50,6 +60,7 @@ class _NFCPromptBottomSheetState extends State<NFCPromptBottomSheet>
   Future<void> _checkNfcAvailability() async {
     try {
       final availability = await NfcManager.instance.checkAvailability();
+      debugPrint('NFCPrompt: checkAvailability => $availability');
       if (availability == NfcAvailability.enabled) {
         setState(() {
           isNfcAvailable = true;
@@ -68,7 +79,20 @@ class _NFCPromptBottomSheetState extends State<NFCPromptBottomSheet>
     }
   }
 
+  Future<void> _cancelAndClose() async {
+    debugPrint('NFCPrompt: cancelling and stopping NFC session');
+    await NfcManager.instance.stopSession();
+    if (!widget.isReader && Platform.isAndroid) {
+      debugPrint('NFCPrompt: stopping HCE');
+      await _flutterNfcHce.stopNfcHce();
+      debugPrint('NFCPrompt: HCE stopped');
+    }
+    _transactionSub?.cancel();
+    if (mounted) Navigator.pop(context);
+  }
+
   Future<void> _setupNfc() async {
+    debugPrint('NFCPrompt: _setupNfc() called; isReader=${widget.isReader}');
     if (widget.isReader) {
       NfcManager.instance.startSession(
         pollingOptions: {
@@ -77,7 +101,7 @@ class _NFCPromptBottomSheetState extends State<NFCPromptBottomSheet>
           NfcPollingOption.iso18092,
         },
         onDiscovered: (NfcTag tag) async {
-          print("Seen: $tag");
+          debugPrint("NFCPrompt: Seen tag: $tag");
 
           String receivedMessage = '';
           Ndef? ndef = Ndef.from(tag);
@@ -91,11 +115,11 @@ class _NFCPromptBottomSheetState extends State<NFCPromptBottomSheet>
                 );
               }
             }
-            print('Received: $receivedMessage');
+            debugPrint('NFCPrompt: Received NDEF: $receivedMessage');
           } else {
-            print('No NDEF support, trying IsoDep for HCE NDEF');
+            debugPrint('NFCPrompt: No NDEF support, trying IsoDep for HCE NDEF');
             if ((tag.data as Map<String, dynamic>).containsKey('isodep')) {
-              print('IsoDep tag detected');
+              debugPrint('NFCPrompt: IsoDep tag detected');
               final isoDep = IsoDepAndroid.from(tag);
               if (isoDep != null) {
                 try {
@@ -103,83 +127,80 @@ class _NFCPromptBottomSheetState extends State<NFCPromptBottomSheet>
                   final selectAid = Uint8List.fromList([
                     0x00, 0xA4, 0x04, 0x00, 0x07, 0xD2, 0x76, 0x00, 0x00, 0x85, 0x01, 0x01
                   ]);
-                  print('Sending select AID command');
+                  debugPrint('NFCPrompt: Sending select AID command');
                   var response = await isoDep.transceive(selectAid);
-                  print('Select AID response: ${response.map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ')}');
+                  debugPrint('NFCPrompt: Select AID response: ${response.map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ')}');
                   if (response.length >= 2 &&
                       response[response.length - 2] == 0x90 &&
                       response[response.length - 1] == 0x00) {
                     // Read Capability Container (15 bytes from offset 0)
                     final readCC = Uint8List.fromList([0x00, 0xB0, 0x00, 0x00, 0x0F]);
-                    print('Sending read CC command');
+                    debugPrint('NFCPrompt: Sending read CC command');
                     response = await isoDep.transceive(readCC);
-                    print('CC response: ${response.map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ')}');
-                    if (response.length >= 17 &&  // Min CC + SW
+                    debugPrint('NFCPrompt: CC response: ${response.map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ')}');
+                    if (response.length >= 17 &&
                         response[response.length - 2] == 0x90 &&
                         response[response.length - 1] == 0x00) {
                       // Parse NLEN (NDEF length) from bytes 12-13 (big-endian)
                       int nlen = (response[12] << 8) | response[13];
-                      print('NDEF length: $nlen');
+                      debugPrint('NFCPrompt: NDEF length: $nlen');
                       if (nlen > 0 && nlen <= 255) {
                         // Read NDEF (short read, assume <256 bytes)
                         final readNdef = Uint8List.fromList([0x00, 0xB0, 0x00, 0x0F, nlen]);
-                        print('Sending read NDEF command');
+                        debugPrint('NFCPrompt: Sending read NDEF command');
                         response = await isoDep.transceive(readNdef);
-                        print('NDEF response: ${response.map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ')}');
+                        debugPrint('NFCPrompt: NDEF response: ${response.map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ')}');
                         if (response.length >= nlen + 2 &&
                             response[response.length - 2] == 0x90 &&
                             response[response.length - 1] == 0x00) {
-                          // Parse as single well-known text record (skip MB/ME/SR/IL/TNF=1, type='T', lang, text)
                           Uint8List ndefBytes = response.sublist(0, nlen);
-                          print('NDEF bytes: ${ndefBytes.map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ')}');
+                        debugPrint('NFCPrompt: NDEF bytes: ${ndefBytes.map((b) => '0x${b.toRadixString(16).padLeft(2, '0')}').join(' ')}');
                           if (ndefBytes.length >= 4 &&
-                              ndefBytes[0] & 0xD0 == 0xD1 &&  // MB=1, ME=1, TNF=1 (well-known)
-                              ndefBytes[1] == 0x01 &&  // Type length=1 ('T')
-                              String.fromCharCodes(ndefBytes.sublist(2, 3)) == 'T') {  // Type='T'
-                            int payloadStart = 3;  // After TNF+type+typeLen
-                            int langLength = ndefBytes[payloadStart] & 0x3F;  // RFC 4646 lang (low 6 bits)
+                              ndefBytes[0] & 0xD0 == 0xD1 &&
+                              ndefBytes[1] == 0x01 &&
+                              String.fromCharCodes(ndefBytes.sublist(2, 3)) == 'T') {
+                            int payloadStart = 3;
+                            int langLength = ndefBytes[payloadStart] & 0x3F;
                             payloadStart += 1 + langLength;
                             if (payloadStart < ndefBytes.length) {
                               receivedMessage = utf8.decode(ndefBytes.sublist(payloadStart));
                               print('Parsed HCE NDEF text: $receivedMessage');
                             }
                           } else {
-                            print('NDEF parse failed: invalid format');
+                            debugPrint('NFCPrompt: NDEF parse failed: invalid format');
                           }
                         } else {
-                          print('NDEF read failed');
+                          debugPrint('NFCPrompt: NDEF read failed');
                           showToast('Failed to read NDEF data', Colors.red);
                         }
                       } else {
-                        print('Invalid NDEF length: $nlen');
+                        debugPrint('NFCPrompt: Invalid NDEF length: $nlen');
                         showToast('No NDEF data or too large', Colors.orange);
                       }
                     } else {
-                      print('CC read failed');
+                      debugPrint('NFCPrompt: CC read failed');
                       showToast('Failed to read CC', Colors.red);
                     }
                   } else {
-                    print('AID select failed');
+                    debugPrint('NFCPrompt: AID select failed');
                     showToast('HCE NDEF AID not selected', Colors.red);
                   }
                 } catch (e) {
-                  print('IsoDep error: $e');
+                  debugPrint('NFCPrompt: IsoDep error: $e');
                   showToast('Error reading HCE: $e', Colors.red);
-                } finally {
-
-                }
+                } finally {}
               } else {
-                print('Invalid IsoDep tag');
+                debugPrint('NFCPrompt: Invalid IsoDep tag');
                 showToast('Invalid IsoDep tag', Colors.red);
               }
             } else {
-              print('No IsoDep key in tag data');
-              showToast('Unsupported tag type', Colors.red);
+                debugPrint('NFCPrompt: No IsoDep key in tag data');
+                showToast('Unsupported tag type', Colors.red);
             }
           }
 
-          // Delay stop to allow UI update
           await Future.delayed(const Duration(milliseconds: 500));
+          debugPrint('NFCPrompt: stopping reader session');
           await NfcManager.instance.stopSession();
 
           if (mounted && receivedMessage.isNotEmpty) {
@@ -190,9 +211,10 @@ class _NFCPromptBottomSheetState extends State<NFCPromptBottomSheet>
                 'receiverId': receivedMessage,
                 'amount': 0.0,
                 'purpose': 'nfc_connection',
-                'timestamp': Timestamp.now(),
+                'timestamp': FieldValue.serverTimestamp(),
                 'status': 'pending',
                 'type': 'nfc_connection',
+                'isInternal': true,
               });
             }
             DocumentSnapshot receiverDoc = await FirebaseFirestore.instance
@@ -202,6 +224,7 @@ class _NFCPromptBottomSheetState extends State<NFCPromptBottomSheet>
             String receiverName = receiverDoc.exists
                 ? '${receiverDoc['firstName']} ${receiverDoc['lastName']}'
                 : receivedMessage;
+            debugPrint('NFCPrompt: Connected to $receiverName');
             showToast('Connected to $receiverName', Colors.green);
             Navigator.pop(context);
             navigateTo(
@@ -210,6 +233,7 @@ class _NFCPromptBottomSheetState extends State<NFCPromptBottomSheet>
               type: NavigationType.push,
             );
           } else if (mounted) {
+            debugPrint('NFCPrompt: No valid data received');
             showToast('No valid data received, try again', Colors.orange);
           }
         },
@@ -226,11 +250,12 @@ class _NFCPromptBottomSheetState extends State<NFCPromptBottomSheet>
       if (Platform.isAndroid) {
         try {
           User? currentUser = FirebaseAuth.instance.currentUser;
-          if (currentUser == null) {
+            if (currentUser == null) {
+            debugPrint('NFCPrompt: Not logged in for HCE start');
             showToast('Not logged in', Colors.red);
             return;
-          }
-          String endpointId = currentUser.uid;
+            }
+            String endpointId = currentUser.uid;
           var query = await FirebaseFirestore.instance
               .collection('transactions')
               .where('receiverId', isEqualTo: endpointId)
@@ -240,11 +265,12 @@ class _NFCPromptBottomSheetState extends State<NFCPromptBottomSheet>
           _lastTimestamp = query.docs.isNotEmpty
               ? query.docs.first['timestamp']
               : null;
+          debugPrint('NFCPrompt: starting HCE with endpointId: $endpointId');
           await _flutterNfcHce.startNfcHce(endpointId);
-          print('HCE started successfully with UID: $endpointId');
+          debugPrint('NFCPrompt: HCE started successfully with UID: $endpointId');
           _listenForTransaction();
         } catch (e) {
-          print('Failed to start HCE: $e');
+          debugPrint('NFCPrompt: Failed to start HCE: $e');
           showToast('Failed to share: $e', Colors.red);
         }
       } else {
@@ -289,7 +315,6 @@ class _NFCPromptBottomSheetState extends State<NFCPromptBottomSheet>
                     .get();
                 String senderName =
                     '${senderDoc['firstName']} ${senderDoc['lastName']}';
-                /////
                 if (mounted) {
                   Navigator.pop(context);
                   await _flutterNfcHce.stopNfcHce();
@@ -326,72 +351,104 @@ class _NFCPromptBottomSheetState extends State<NFCPromptBottomSheet>
     super.dispose();
   }
 
-
-
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-      ),
-      child: SafeArea(bottom: true,
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(
-                widget.isReader
-                    ? 'Place Your Phone\nNear the POS'
-                    : 'Place the Reader\nNear Your Phone',
-                style: const TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
+    return PopScope(
+      // Prevents the back gesture/button from closing the sheet
+      canPop: false,
+      child: Container(
+        width: double.infinity,
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        child: SafeArea(
+          bottom: true,
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Drag handle (purely decorative, drag is disabled)
+                Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    color: Colors.grey[300],
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 20),
-              if (!isNfcAvailable) ...[
-                const Text(
-                  'NFC is not enabled. Please enable it to proceed.',
-                  style: TextStyle(fontSize: 14, color: Colors.red),
+                Text(
+                  widget.isReader
+                      ? 'Place Your Phone\nNear the POS'
+                      : 'Place the Customer\'s Phone \nNear Your Phone',
+                  style: const TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                  ),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 20),
-                ElevatedButton(
-                  onPressed: () {
-                    AppSettings.openAppSettings(type: AppSettingsType.nfc);
-                    Future.delayed(
-                      const Duration(seconds: 2),
-                      _checkNfcAvailability,
-                    );
-                  },
-                  child: const Text('Enable NFC'),
-                ),
-              ] else ...[
-                Text(
-                  widget.isReader
-                      ? 'Hold the back of your phone to the merchant device'
-                      : 'Hold the back of your phone to the back of the customer device',
-                  style: const TextStyle(fontSize: 14, color: Colors.grey),
-                  textAlign: TextAlign.center,
-                ),
+                if (!isNfcAvailable) ...[
+                  const Text(
+                    'NFC is not enabled. Please enable it to proceed.',
+                    style: TextStyle(fontSize: 14, color: Colors.red),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 20),
+                  ElevatedButton(
+                    onPressed: () {
+                      AppSettings.openAppSettings(type: AppSettingsType.nfc);
+                      Future.delayed(
+                        const Duration(seconds: 2),
+                        _checkNfcAvailability,
+                      );
+                    },
+                    child: const Text('Enable NFC'),
+                  ),
+                ] else ...[
+                  Text(
+                    widget.isReader
+                        ? 'Hold the back of your phone to the merchant device'
+                        : 'Hold the back of your phone to the back of the customer\'s phone',
+                    style: const TextStyle(fontSize: 14, color: Colors.grey),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 40),
+                  ScaleTransition(
+                    scale: _scaleAnimation,
+                    child: Container(
+                      width: 60,
+                      height: 60,
+                      decoration: const BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.blue,
+                      ),
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 40),
-                ScaleTransition(
-                  scale: _scaleAnimation,
-                  child: Container(
-                    width: 60,
-                    height: 60,
-                    decoration: const BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: Colors.blue,
+                // Cancel button — the only way to dismiss
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
+                    onPressed: _cancelAndClose,
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(double.infinity, 50),
+                      side: const BorderSide(color: Colors.transparent),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8.0),
+                      ),
+                    ),
+                    child: const Text(
+                      'Cancel',
+                      style: TextStyle(color: Colors.red, fontSize: 16),
                     ),
                   ),
                 ),
               ],
-            ],
+            ),
           ),
         ),
       ),
@@ -453,7 +510,6 @@ class _TransferPageState extends State<TransferPage> {
     }
     String purpose = _purposeController.text;
 
-    // Perform real settlement: create (or reuse) counterparty and call sudoTransferNip
     try {
       final settled = await _settleNfcPayment(amount, purpose);
       if (!settled) {
@@ -492,7 +548,6 @@ class _TransferPageState extends State<TransferPage> {
         return false;
       }
 
-      // Sender's account details
       final accountDetails = await getCurrentAccountIdAndType();
       final senderAccountId = accountDetails['accountId']?.toString() ?? '';
       final senderAccountNumber = accountDetails['accountNumber']?.toString() ?? '';
@@ -504,7 +559,6 @@ class _TransferPageState extends State<TransferPage> {
         return false;
       }
 
-      // Recipient's VA details
       final recipientDoc = await FirebaseFirestore.instance.collection('users').doc(widget.endpointId).get();
       final recipientVa = getVirtualAccountData(recipientDoc.data());
       if (recipientVa == null) {
@@ -527,7 +581,6 @@ class _TransferPageState extends State<TransferPage> {
       final recipientBankId =
           recipientVa['attributes']?['bank']?['id']?.toString() ?? '090286';
 
-      // Prevent sending to own account
       final ownAccountNumber = senderAccountNumber;
       if (ownAccountNumber.isNotEmpty &&
           ownAccountNumber == recipientAccountNumber) {
@@ -586,7 +639,8 @@ class _TransferPageState extends State<TransferPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.white,
-      body: SafeArea(bottom: true,
+      body: SafeArea(
+        bottom: true,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -598,13 +652,13 @@ class _TransferPageState extends State<TransferPage> {
                     onTap: () {
                       Navigator.of(context).pop();
                     },
-                    child: Icon(
+                    child: const Icon(
                       Icons.arrow_back_ios,
                       color: Colors.black87,
                       size: 20,
                     ),
                   ),
-                  SizedBox(width: 20),
+                  const SizedBox(width: 20),
                   Text(
                     receiverName == null
                         ? 'Bank Transfer'
@@ -629,7 +683,7 @@ class _TransferPageState extends State<TransferPage> {
               ),
               child: TextField(
                 controller: _amountController,
-                keyboardType: TextInputType.numberWithOptions(decimal: true),
+                keyboardType: const TextInputType.numberWithOptions(decimal: true),
                 decoration: InputDecoration(
                   prefixText: '₦ ',
                   border: OutlineInputBorder(

@@ -225,7 +225,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
           if (userDoc.exists) {
             final data = userDoc.data();
             debugPrint('Found user $uid, userName: ${data?['userName']}');
-            final vaData = data?['sudoData']?['virtualAccount']?['data'];
+            final vaData = data?['safehavenData']?['virtualAccount']?['data'];
             if (vaData != null) {
               info = {'uid': uid, 'data': data, 'collection': 'users'};
             } else {
@@ -249,7 +249,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
             'Business ${doc.id}: original "$businessName" (normalized: "$normalizedBusinessName")',
           );
           if (normalizedBusinessName == normalizedInput) {
-            final vaData = data['sudoData']?['virtualAccount']?['data'];
+            final vaData = data['safehavenData']?['virtualAccount']?['data'];
             if (vaData != null) {
               info = {'uid': doc.id, 'data': data, 'collection': 'businesses'};
               debugPrint('Matched business ${doc.id}');
@@ -274,7 +274,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
       }
       if (info != null) {
         final data = info['data'];
-        final vaData = data['sudoData']?['virtualAccount']?['data'];
+        final vaData = data['safehavenData']?['virtualAccount']?['data'];
         final attributes = vaData?['attributes'] as Map<String, dynamic>? ?? {};
         String displayName;
         if (info['collection'] == 'users') {
@@ -334,7 +334,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
     if (userQuery.docs.isNotEmpty) {
       final doc = userQuery.docs.first;
       final data = doc.data();
-      final vaData = data['sudoData']?['virtualAccount']?['data'];
+      final vaData = data['safehavenData']?['virtualAccount']?['data'];
       if (vaData != null) {
         return {'uid': doc.id, 'data': data, 'collection': 'users'};
       }
@@ -373,7 +373,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
         isValid = info != null;
         if (info != null) {
           final data = info['data'];
-          final vaData = data['sudoData']?['virtualAccount']?['data'];
+          final vaData = data['safehavenData']?['virtualAccount']?['data'];
           final attributes =
               vaData?['attributes'] as Map<String, dynamic>? ?? {};
           resolvedAccountName =
@@ -418,7 +418,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
       final String kycStatus = data['kycStatus'] ?? '';
       if (kycStatus == 'APPROVED') {
         final Map<String, dynamic>? virtualAccData =
-            data['sudoData']?['virtualAccount']?['data']
+            data['safehavenData']?['virtualAccount']?['data']
                 as Map<String, dynamic>?;
         if (virtualAccData != null && virtualAccData['id'] != null) {
           final attributes =
@@ -450,7 +450,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
     if (userSnap.exists && userSnap.data() != null) {
       final data = userSnap.data()!;
       final Map<String, dynamic>? virtualAccData =
-          data['sudoData']?['virtualAccount']?['data']
+          data['safehavenData']?['virtualAccount']?['data']
               as Map<String, dynamic>?;
       if (virtualAccData != null && virtualAccData['id'] != null) {
         final attributes =
@@ -556,7 +556,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
     }
     final recipientData = recipientInfo!['data'];
     final recipientVaData =
-        recipientData['sudoData']?['virtualAccount']?['data'];
+        recipientData['safehavenData']?['virtualAccount']?['data'];
     final recipientAttributes =
         recipientVaData?['attributes'] as Map<String, dynamic>? ?? {};
     final recipientAccountName =
@@ -770,7 +770,7 @@ class _WithdrawForCustomerPageState extends State<WithdrawForCustomerPage> {
                                       ),
                                     )
                                   : Icon(
-                                      Icons.check_circle,
+                                     isValid? Icons.check_circle: Icons.cancel,
                                       color: isValid
                                           ? Colors.green
                                           : Colors.red,
@@ -1256,7 +1256,7 @@ class _WithdrawalApprovalPageState extends State<WithdrawalApprovalPage> {
       final String kycStatus = data['kycStatus'] ?? '';
 
       if (kycStatus == 'APPROVED') {
-        final Map<String, dynamic>? virtualAccData = data['sudoData']?['virtualAccount']?['data'] as Map<String, dynamic>?;
+        final Map<String, dynamic>? virtualAccData = data['safehavenData']?['virtualAccount']?['data'] as Map<String, dynamic>?;
 
         if (virtualAccData != null && virtualAccData['id'] != null) {
           final bankMap = virtualAccData['attributes']?['bank'] as Map<String, dynamic>?;
@@ -1278,7 +1278,7 @@ class _WithdrawalApprovalPageState extends State<WithdrawalApprovalPage> {
     if (userSnap.exists && userSnap.data() != null) {
       final data = userSnap.data()!;
       final Map<String, dynamic>? virtualAccData =
-          data['sudoData']?['virtualAccount']?['data'] as Map<String, dynamic>?;
+          data['safehavenData']?['virtualAccount']?['data'] as Map<String, dynamic>?;
 
       if (virtualAccData != null && virtualAccData['id'] != null) {
         final bankMap = virtualAccData['attributes']?['bank'] as Map<String, dynamic>?;
